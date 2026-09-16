@@ -778,8 +778,9 @@
 
   function renderGlobal() {
     const msg = 'No global scores yet — claim #1!';
-    populateList($('globalList'), globalCache, msg);
-    populateList($('overGlobalList'), globalCache, msg);
+    const top = globalCache.slice(0, 100); // in-game shows the top 100; board.html shows the full archive
+    populateList($('globalList'), top, msg);
+    populateList($('overGlobalList'), top, msg);
   }
 
   async function submitGlobal(name, score, maxTile) {
@@ -803,14 +804,7 @@
       const list = await kvGet();
       list.push(entry);
       list.sort((a, b) => b.score - a.score || a.ts - b.ts);
-      const perName = new Map();
-      const capped = list.filter((e) => {
-        const k = String(e.name).toLowerCase();
-        const n = perName.get(k) || 0;
-        if (n >= 10) return false;
-        perName.set(k, n + 1);
-        return true;
-      }).slice(0, 100);
+      const capped = list.slice(0, 2000); // full archive — no per-player cap
       await kvPut(capped);
       const rank = capped.findIndex((e) => e === entry) + 1 || capped.filter((e) => e.score > entry.score).length + 1;
       const isPB = !capped.some((e) => e !== entry && String(e.name).toLowerCase() === entry.name.toLowerCase() && e.score > entry.score);

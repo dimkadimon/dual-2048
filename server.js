@@ -21,8 +21,7 @@ const ROOT = path.join(__dirname, 'public');
 const DATA_DIR = path.join(__dirname, 'data');
 const DATA_FILE = path.join(DATA_DIR, 'scores.json');
 const KV_URL = process.env.KV_URL || '';
-const MAX_STORED = 100;
-const MAX_PER_NAME = 10;
+const MAX_STORED = 2000; // full archive of scores (no per-player cap)
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -107,14 +106,7 @@ async function loadScores() {
 
 function applyCaps(list) {
   list.sort((a, b) => b.score - a.score || a.ts - b.ts);
-  const perName = new Map();
-  return list.filter((e) => {
-    const k = String(e.name).toLowerCase();
-    const n = perName.get(k) || 0;
-    if (n >= MAX_PER_NAME) return false;
-    perName.set(k, n + 1);
-    return true;
-  }).slice(0, MAX_STORED);
+  return list.slice(0, MAX_STORED);
 }
 
 let scores = [];
