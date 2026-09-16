@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#070a16" />
+  <title>Dual 2048 — Full Global Leaderboard</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%230d1230'/%3E%3Crect x='8' y='8' width='22' height='22' rx='5' fill='%23fbbf24'/%3E%3Cpath d='M45 12l11 6.5v13L45 38l-11-6.5v-13z' fill='%2322d3ee'/%3E%3Crect x='8' y='36' width='22' height='20' rx='5' fill='%231a2044'/%3E%3C/svg%3E" />
+  <style>
+    :root {
+      --bg: #070a16; --panel: #0d1230; --line: rgba(124, 140, 255, 0.16);
+      --ink: #e8ecff; --dim: #8b93b8; --two: #fbbf24; --three: #22d3ee; --pink: #fb7185;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 24px 14px 60px; background: var(--bg); color: var(--ink);
+      font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+    .wrap { max-width: 860px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
+    h1 {
+      margin: 0; text-align: center; font-size: clamp(28px, 7vw, 40px); font-weight: 900; letter-spacing: 1px;
+      background: linear-gradient(90deg, var(--two), var(--pink) 45%, var(--three));
+      -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; color: transparent;
+    }
+    @supports not ((-webkit-background-clip: text) or (background-clip: text)) { h1 { color: var(--two); } }
+    .sub { text-align: center; color: var(--dim); font-size: 12px; margin: -10px 0 0; }
+    .stats { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+    .stat {
+      background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+      padding: 8px 16px; text-align: center; min-width: 96px;
+    }
+    .stat label { display: block; font-size: 9.5px; letter-spacing: 1.5px; color: var(--dim); }
+    .stat b { font-size: 19px; font-variant-numeric: tabular-nums; }
+    .card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px; }
+    h2 { margin: 0 0 10px; font-size: 13px; letter-spacing: 2px; color: var(--dim); font-weight: 800; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th {
+      text-align: left; font-size: 10px; letter-spacing: 1.2px; color: var(--dim);
+      padding: 4px 8px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--panel);
+    }
+    td { padding: 5px 8px; border-bottom: 1px solid rgba(124, 140, 255, 0.07); font-variant-numeric: tabular-nums; }
+    tr:last-child td { border-bottom: 0; }
+    .r { color: var(--dim); width: 34px; }
+    .n { font-weight: 700; }
+    .s { color: var(--two); font-weight: 800; text-align: right; }
+    .t { color: var(--three); text-align: right; }
+    .w { color: var(--dim); font-size: 11.5px; text-align: right; white-space: nowrap; }
+    tr.top td { background: rgba(251, 191, 36, 0.07); }
+    .bar { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-top: 4px; }
+    .btns { display: flex; gap: 8px; }
+    button, a.btn {
+      font: inherit; font-size: 12px; font-weight: 700; letter-spacing: 0.5px; cursor: pointer;
+      color: var(--ink); background: rgba(124, 140, 255, 0.1); border: 1px solid var(--line);
+      border-radius: 10px; padding: 7px 14px; text-decoration: none;
+    }
+    button:hover, a.btn:hover { background: rgba(124, 140, 255, 0.2); }
+    #status { color: var(--dim); font-size: 11px; }
+    .err { color: var(--pink); }
+    .scrollbox { max-height: 560px; overflow-y: auto; overscroll-behavior: contain; }
+    footer { text-align: center; color: var(--dim); font-size: 11px; }
+    footer a { color: var(--dim); }
+    @media (max-width: 560px) { .w { display: none; } th.w, td.w { display: none; } }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div>
+      <h1>Dual 2048</h1>
+      <p class="sub">FULL GLOBAL LEADERBOARD — every stored score, live from the shared board</p>
+    </div>
+
+    <div class="stats" id="stats"></div>
+
+    <div class="card">
+      <div class="bar">
+        <h2>🏆 ALL SCORES</h2>
+        <div class="btns">
+          <span id="status"></span>
+          <button id="btnRefresh">REFRESH ⟳</button>
+        </div>
+      </div>
+      <div class="scrollbox">
+        <table>
+          <thead><tr><th class="r">#</th><th>PLAYER</th><th class="t">BEST TILE</th><th class="s">SCORE</th><th class="w">WHEN</th></tr></thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>👤 PER-PLAYER SUMMARY</h2>
+      <table>
+        <thead><tr><th class="r">#</th><th>PLAYER</th><th class="t">GAMES</th><th class="t">BEST TILE</th><th class="s">BEST SCORE</th><th class="s">TOTAL</th></tr></thead>
+        <tbody id="prows"></tbody>
+      </table>
+    </div>
+
+    <footer>
+      <a href="index.html">← back to the game</a> · board refreshes every 30 s ·
+      raw data: <a href="https://kvdb.io/WFqmZseFLUPww2FWnuzBWs/scores" target="_blank" rel="noopener">kvdb bucket</a>
+    </footer>
+  </div>
+
+  <script>
+    'use strict';
+    var KV = 'https://kvdb.io/WFqmZseFLUPww2FWnuzBWs/scores';
+    var $ = function (id) { return document.getElementById(id); };
+    var esc = function (s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); };
+    var fmtWhen = function (ts) {
+      try {
+        var d = new Date(ts);
+        return d.toLocaleDateString(undefined, { day: '2-digit', month: 'short' }) + ' ' +
+               d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+      } catch (e) { return ''; }
+    };
+
+    async function load() {
+      $('status').textContent = 'loading…';
+      var list = null;
+      try {
+        var r = await fetch(KV, { cache: 'no-store' });
+        if (r.ok) list = JSON.parse(await r.text());
+      } catch (e) { /* fall through */ }
+      if (!Array.isArray(list)) {
+        try {
+          var r2 = await fetch('api/scores', { cache: 'no-store' });
+          var j = await r2.json();
+          if (j && Array.isArray(j.scores)) list = j.scores;
+        } catch (e) { /* ignore */ }
+      }
+      if (!Array.isArray(list)) {
+        $('status').innerHTML = '<span class="err">board offline — try again</span>';
+        return;
+      }
+      list.sort(function (a, b) { return b.score - a.score || a.ts - b.ts; });
+      render(list);
+      $('status').textContent = 'updated ' + new Date().toLocaleTimeString();
+    }
+
+    function render(list) {
+      // headline stats
+      var players = {};
+      list.forEach(function (e) {
+        var k = String(e.name).toLowerCase();
+        players[k] = players[k] || { name: e.name, games: 0, best: 0, tile: 0, total: 0 };
+        players[k].games++;
+        players[k].best = Math.max(players[k].best, e.score);
+        players[k].tile = Math.max(players[k].tile, e.maxTile || 0);
+        players[k].total += e.score;
+      });
+      var arr = Object.keys(players).map(function (k) { return players[k]; })
+        .sort(function (a, b) { return b.best - a.best || b.tile - a.tile; });
+      var topTile = list.reduce(function (m, e) { return Math.max(m, e.maxTile || 0); }, 0);
+      $('stats').innerHTML =
+        '<div class="stat"><label>SCORES</label><b>' + list.length + '</b></div>' +
+        '<div class="stat"><label>PLAYERS</label><b>' + arr.length + '</b></div>' +
+        '<div class="stat"><label>TOP SCORE</label><b>' + (list[0] ? list[0].score.toLocaleString() : '—') + '</b></div>' +
+        '<div class="stat"><label>TOP TILE</label><b>' + (topTile || '—') + '</b></div>';
+
+      // every score
+      $('rows').innerHTML = list.map(function (e, i) {
+        return '<tr' + (i === 0 ? ' class="top"' : '') + '><td class="r">' + (i + 1) + '</td>' +
+          '<td class="n">' + esc(e.name) + '</td>' +
+          '<td class="t">' + (e.maxTile || 0) + '</td>' +
+          '<td class="s">' + Number(e.score).toLocaleString() + '</td>' +
+          '<td class="w">' + fmtWhen(e.ts) + '</td></tr>';
+      }).join('') || '<tr><td colspan="5" style="text-align:center;color:var(--dim)">No global scores yet — claim #1!</td></tr>';
+
+      // per-player
+      $('prows').innerHTML = arr.map(function (p, i) {
+        return '<tr' + (i === 0 ? ' class="top"' : '') + '><td class="r">' + (i + 1) + '</td>' +
+          '<td class="n">' + esc(p.name) + '</td>' +
+          '<td class="t">' + p.games + '</td>' +
+          '<td class="t">' + p.tile + '</td>' +
+          '<td class="s">' + p.best.toLocaleString() + '</td>' +
+          '<td class="s">' + p.total.toLocaleString() + '</td></tr>';
+      }).join('');
+    }
+
+    $('btnRefresh').addEventListener('click', load);
+    load();
+    setInterval(load, 30000);
+  </script>
+</body>
+</html>
