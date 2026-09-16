@@ -67,6 +67,20 @@ npx surge ./public yourdomain.surge.sh     # or Netlify / GitHub Pages / S3 …
 
 Live example: https://dual2048-game.surge.sh
 
+## Live deployments
+
+- **Server (Node) — Render:** https://dual-2048.onrender.com
+- **Static — Surge:** https://dual2048-game.surge.sh
+- **Source:** https://github.com/dimkadimon/dual-2048
+
+All three share one global leaderboard. Set `KV_URL` to a kvdb.io bucket
+(e.g. `https://kvdb.io/<bucket>/scores`) so every deployment reads/writes the
+same store. On boot and on each `GET /api/scores` the server merges the local
+file with the shared store and self-heals it — so entries lost to a stale
+writer (e.g. the browser-side static client doing a read-modify-write) are
+recovered automatically. Render's free tier has an ephemeral disk, so `KV_URL`
+is what makes scores persist there.
+
 ## API (server mode)
 
 - `GET /api/scores` — top 20 `{ name, score, maxTile, ts }`
@@ -88,3 +102,27 @@ data/scores.json   global leaderboard persistence
 
 Copy the folder to any Node host (Fly, Render, Railway, a VPS…) and run `node server.js`.
 Make `data/` writable so scores persist between restarts.
+
+### Render (free tier)
+
+The repo is already wired for Render. Create a Web Service from
+`github.com/dimkadimon/dual-2048` (or use the API) with:
+
+| Field | Value |
+| --- | --- |
+| Runtime | Node |
+| Region | singapore (Render has no Sydney region) |
+| Plan | free |
+| Build command | `npm install` |
+| Start command | `node server.js` |
+| Health check path | `/api/scores` |
+| Env var | `KV_URL=https://kvdb.io/<bucket>/scores` |
+
+Because the free tier's disk is ephemeral, `KV_URL` is what keeps the
+leaderboard alive across restarts — the local `data/scores.json` is only a
+per-instance cache. Redeploy any time with:
+
+```bash
+curl -X POST https://api.render.com/v1/services/<SERVICE_ID>/deploys \
+  -H "Authorization: Bearer <RENDER_API_KEY>" -H "Content-Type: application/json" -d '{}'
+```
