@@ -173,7 +173,10 @@ const server = http.createServer(async (req, res) => {
       const remote = await kvGet(); // shared store wins when configured
       if (remote && remote.length) {
         const seen = new Set(remote.map((e) => e.ts + '|' + e.name));
-        scores = applyCaps(remote.concat(scores.filter((e) => !seen.has(e.ts + '|' + e.name))));
+        const merged = applyCaps(remote.concat(scores.filter((e) => !seen.has(e.ts + '|' + e.name))));
+        // self-heal: if the shared store lost entries to a stale writer, push the union back
+        if (JSON.stringify(merged) !== JSON.stringify(applyCaps(remote))) kvPut(merged);
+        scores = merged;
       }
     }
     return sendJSON(res, 200, { ok: true, scores: scores.slice(0, 50) });
