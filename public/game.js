@@ -1,5 +1,5 @@
 /* ============================================================
-   DUAL 2048 — two lineages (2·4·8… and 3·9·27…), walls, juice.
+   DUAL 2048 — two lineages (2·4·8… and 3·6·12…), walls, juice.
    Zero dependencies. Canvas board + HTML HUD/overlays.
    ============================================================ */
 'use strict';
@@ -508,9 +508,8 @@
     $('overTile').textContent = st.maxTile || '—';
     $('overMoves').textContent = st.moves;
     $('overRecord').classList.toggle('hidden', !isRecord);
-    $('overRank').textContent = '';
 
-    // submit in the background so the rank is ready when the user continues
+    // submit in the background so the board is ready when the user continues
     pendingSubmit = submitGlobal(playerName, st.score, st.maxTile).catch(() => null);
 
     updateHud();
@@ -520,16 +519,7 @@
     Audio.ui();
     setScreen('over');
     renderLocal();
-    const rankMsg = $('overRank');
-    rankMsg.textContent = 'Checking global rank…';
-    const res = await (pendingSubmit || Promise.resolve(null));
-    if (res && res.ok) {
-      rankMsg.innerHTML = `Global rank <b>#${res.rank}</b> of ${res.total} — ${res.isPB ? 'new personal best on the board!' : 'submitted.'}`;
-    } else if (!st.score) {
-      rankMsg.textContent = 'No points to submit this time — saved to your local table.';
-    } else {
-      rankMsg.textContent = 'Global leaderboard offline — score saved locally.';
-    }
+    await (pendingSubmit || Promise.resolve(null)); // submit silently; the Global tab shows the outcome
     fetchGlobal();
   }
 

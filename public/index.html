@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#070a16" />
   <title>Dual 2048 — two lineages, one board</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%230d1230'/%3E%3Crect x='8' y='8' width='22' height='22' rx='5' fill='%23fbbf24'/%3E%3Cpath d='M45 12l11 6.5v13L45 38l-11-6.5v-13z' fill='%2322d3ee'/%3E%3Crect x='8' y='36' width='22' height='20' rx='5' fill='%231a2044'/%3E%3C/svg%3E" />
-  <link rel="stylesheet" href="style.css?v=2.3" />
+  <link rel="stylesheet" href="style.css?v=2.4" />
 </head>
 <body>
   <div class="app">
@@ -90,14 +90,13 @@
       <!-- GAME OVER -->
       <div class="overlay hidden" id="overScreen">
         <div class="panel scroll">
-          <h2 class="over-title">GAME OVER</h2>
+          <h2 class="logo results-title">Dual <span>2048</span></h2>
           <div id="overRecord" class="record hidden">★ NEW PERSONAL BEST ★</div>
           <div class="stats">
             <div><label>SCORE</label><b id="overScore">0</b></div>
             <div><label>BEST TILE</label><b id="overTile">0</b></div>
             <div><label>MOVES</label><b id="overMoves">0</b></div>
           </div>
-          <p class="rankmsg" id="overRank"></p>
           <div class="btnstack">
             <button id="btnRestartOver" class="btn primary">PLAY AGAIN ↻</button>
             <button id="btnMenuOver" class="btn ghost">MENU</button>
@@ -111,7 +110,6 @@
             <ol class="lb" id="overLocalList" data-tab="local"></ol>
             <ol class="lb hidden" id="overGlobalList" data-tab="global"></ol>
           </div>
-          <p class="hint">Press R or Enter for instant rematch</p>
         </div>
       </div>
 
@@ -143,10 +141,11 @@
 
     <footer class="foot">
       <div class="hints"><span>Arrows / WASD / swipe</span><span>·</span><span>P pause</span><span>·</span><span>R restart</span></div>
-      <div class="ver">Dual 2048 · build v2.3</div>
+      <div class="ver">Dual 2048 · build v2.4</div>
+      <a class="ghlink" href="https://github.com/dimkadimon/dual-2048" target="_blank" rel="noopener">github.com/dimkadimon/dual-2048</a>
     </footer>
   </div>
 
-  <script src="game.js?v=2.3"></script>
+  <script src="game.js?v=2.4"></script>
 </body>
 </html>
