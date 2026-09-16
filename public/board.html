@@ -97,7 +97,8 @@
     </div>
 
     <footer>
-      <a href="index.html">← back to the game</a> · board refreshes every 30 s ·
+      <a href="index.html">← back to the game</a> · refreshes every 30 s and on tab focus ·
+      keeps each player's top 10 scores (100 max) ·
       raw data: <a href="https://kvdb.io/WFqmZseFLUPww2FWnuzBWs/scores" target="_blank" rel="noopener">kvdb bucket</a>
     </footer>
   </div>
@@ -105,6 +106,7 @@
   <script>
     'use strict';
     var KV = 'https://kvdb.io/WFqmZseFLUPww2FWnuzBWs/scores';
+    var API = 'https://dual-2048.onrender.com/api/scores'; // secondary source (CORS-open)
     var $ = function (id) { return document.getElementById(id); };
     var esc = function (s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); };
     var fmtWhen = function (ts) {
@@ -115,27 +117,39 @@
       } catch (e) { return ''; }
     };
 
+    async function grab(url, isApi) {
+      try {
+        var r = await fetch(url, { cache: 'no-store' });
+        if (!r.ok) return null;
+        var j = JSON.parse(await r.text());
+        var list = isApi ? (j && j.scores) : j;
+        return Array.isArray(list) ? list : null;
+      } catch (e) { return null; }
+    }
+
+    function union(a, b) {
+      var seen = {}, out = [];
+      (a || []).concat(b || []).forEach(function (e) {
+        if (!e || e.ts == null) return;
+        var k = e.ts + '|' + e.name;
+        if (seen[k]) return;
+        seen[k] = 1; out.push(e);
+      });
+      return out;
+    }
+
     async function load() {
       $('status').textContent = 'loading…';
-      var list = null;
-      try {
-        var r = await fetch(KV, { cache: 'no-store' });
-        if (r.ok) list = JSON.parse(await r.text());
-      } catch (e) { /* fall through */ }
-      if (!Array.isArray(list)) {
-        try {
-          var r2 = await fetch('api/scores', { cache: 'no-store' });
-          var j = await r2.json();
-          if (j && Array.isArray(j.scores)) list = j.scores;
-        } catch (e) { /* ignore */ }
-      }
-      if (!Array.isArray(list)) {
+      var res = await Promise.all([grab(KV, false), grab(API, true)]);
+      var list = union(res[0], res[1]);
+      var src = (res[0] ? 'board' : '') + (res[0] && res[1] ? '+' : '') + (res[1] ? 'server' : '');
+      if (!list.length) {
         $('status').innerHTML = '<span class="err">board offline — try again</span>';
         return;
       }
       list.sort(function (a, b) { return b.score - a.score || a.ts - b.ts; });
       render(list);
-      $('status').textContent = 'updated ' + new Date().toLocaleTimeString();
+      $('status').textContent = list.length + ' scores · ' + (src || 'cache') + ' · ' + new Date().toLocaleTimeString();
     }
 
     function render(list) {
@@ -179,6 +193,7 @@
     }
 
     $('btnRefresh').addEventListener('click', load);
+    document.addEventListener('visibilitychange', function () { if (!document.hidden) load(); });
     load();
     setInterval(load, 30000);
   </script>

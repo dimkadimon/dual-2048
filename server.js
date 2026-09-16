@@ -179,7 +179,17 @@ const server = http.createServer(async (req, res) => {
         scores = merged;
       }
     }
+    res.setHeader('Access-Control-Allow-Origin', '*'); // let the board page union across deployments
     return sendJSON(res, 200, { ok: true, scores: scores.slice(0, 50) });
+  }
+
+  if (p === '/api/scores' && req.method === 'OPTIONS') {
+    res.writeHead(204, {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, OPTIONS',
+      'Access-Control-Max-Age': '86400'
+    });
+    return res.end();
   }
 
   if (p === '/api/scores' && req.method === 'POST') {
