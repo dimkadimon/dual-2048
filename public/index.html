@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#070a16" />
+  <title>Dual 2048 — two lineages, one board</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%230d1230'/%3E%3Crect x='8' y='8' width='22' height='22' rx='5' fill='%23fbbf24'/%3E%3Cpath d='M45 12l11 6.5v13L45 38l-11-6.5v-13z' fill='%2322d3ee'/%3E%3Crect x='8' y='36' width='22' height='20' rx='5' fill='%231a2044'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="style.css?v=2.3" />
+</head>
+<body>
+  <div class="app">
+
+    <header class="hud">
+      <div class="logo hud-logo">Dual <span>2048</span></div>
+      <div class="hud-row">
+        <div class="chip" id="nameChip">Guest</div>
+        <div class="scorebox">
+          <label>SCORE</label>
+          <div class="val" id="score">0</div>
+        </div>
+        <div class="scorebox">
+          <label>BEST</label>
+          <div class="val" id="best">0</div>
+        </div>
+        <div class="hbtns">
+          <button id="btnRestartTop" class="iconbtn" title="Restart (R)" aria-label="Restart">↻</button>
+          <button id="btnPause" class="iconbtn" title="Pause (P)" aria-label="Pause">⏸</button>
+          <button id="btnMute" class="iconbtn" title="Mute (M)" aria-label="Mute">🔊</button>
+        </div>
+      </div>
+    </header>
+
+    <div class="stage" id="stage">
+      <canvas id="game" aria-label="Game board"></canvas>
+
+      <!-- START -->
+      <div class="overlay" id="startScreen">
+        <div class="panel scroll">
+          <h1 class="logo big">Dual <span>2048</span></h1>
+          <p class="tag">Two lineages · one board · every merge doubles</p>
+
+          <div class="rules">
+            <div class="rule">
+              <span class="demo two">8</span>
+              <span><b>Warm squares</b> — start at 2: 2·4·8·16…2048</span>
+            </div>
+            <div class="rule">
+              <span class="demo three">6</span>
+              <span><b>Cool hexes</b> — start at 3: 3·6·12·24…3072. Lineages never mix!</span>
+            </div>
+            <div class="rule">
+              <span class="demo wall"></span>
+              <span><b>2 walls</b> — never move, block slides &amp; merges. Chain merges for COMBO bonuses.</span>
+            </div>
+          </div>
+
+          <div class="startrow">
+            <input id="nameInput" type="text" maxlength="16" placeholder="Your name" autocomplete="off" spellcheck="false" />
+            <button id="btnPlay" class="btn primary big">PLAY ▶</button>
+          </div>
+
+          <div class="lbwrap">
+            <div class="lb-title">🏆 LEADERBOARDS</div>
+            <div class="tabs">
+              <button data-tab="local" class="active">YOUR BEST</button>
+              <button data-tab="global">GLOBAL</button>
+            </div>
+            <div class="lbhead"><span>#</span><span>PLAYER</span><span>BEST TILE</span><span>TOTAL SCORE</span></div>
+            <ol class="lb" id="localList" data-tab="local"></ol>
+            <ol class="lb hidden" id="globalList" data-tab="global"></ol>
+          </div>
+          <p class="hint">Arrows / WASD / swipe · P pause · R restart · M mute</p>
+        </div>
+      </div>
+
+      <!-- PAUSE -->
+      <div class="overlay hidden" id="pauseScreen">
+        <div class="panel">
+          <h2>PAUSED</h2>
+          <div class="btnstack">
+            <button id="btnResume" class="btn primary">RESUME</button>
+            <button id="btnRestartPause" class="btn">RESTART</button>
+            <button id="btnMenuPause" class="btn ghost">QUIT TO MENU</button>
+          </div>
+          <p class="hint">P / Esc to resume</p>
+        </div>
+      </div>
+
+      <!-- GAME OVER -->
+      <div class="overlay hidden" id="overScreen">
+        <div class="panel scroll">
+          <h2 class="over-title">GAME OVER</h2>
+          <div id="overRecord" class="record hidden">★ NEW PERSONAL BEST ★</div>
+          <div class="stats">
+            <div><label>SCORE</label><b id="overScore">0</b></div>
+            <div><label>BEST TILE</label><b id="overTile">0</b></div>
+            <div><label>MOVES</label><b id="overMoves">0</b></div>
+          </div>
+          <p class="rankmsg" id="overRank"></p>
+          <div class="btnstack">
+            <button id="btnRestartOver" class="btn primary">PLAY AGAIN ↻</button>
+            <button id="btnMenuOver" class="btn ghost">MENU</button>
+          </div>
+          <div class="lbwrap">
+            <div class="tabs">
+              <button data-tab="local" class="active">YOUR BEST</button>
+              <button data-tab="global">GLOBAL</button>
+            </div>
+            <div class="lbhead"><span>#</span><span>PLAYER</span><span>BEST TILE</span><span>TOTAL SCORE</span></div>
+            <ol class="lb" id="overLocalList" data-tab="local"></ol>
+            <ol class="lb hidden" id="overGlobalList" data-tab="global"></ol>
+          </div>
+          <p class="hint">Press R or Enter for instant rematch</p>
+        </div>
+      </div>
+
+      <!-- GAME OVER, phase 1: final board stays visible -->
+      <div id="reviewBar" class="reviewbar hidden">
+        <div class="rv-head">
+          <span class="rv-title">GAME OVER</span>
+          <span id="reviewRecord" class="record small hidden">★ NEW PB ★</span>
+          <span class="rv-score" id="reviewScore">0</span>
+          <span class="rv-sub">best tile <b id="reviewTile">—</b></span>
+        </div>
+        <div class="rv-row">
+          <button id="btnShare" class="btn primary">📸 SHARE SCREENSHOT</button>
+          <button id="btnContinue" class="btn">CONTINUE →</button>
+        </div>
+        <div class="rv-hint">Copy a screenshot of your final board, then continue to the leaderboards (R = rematch).</div>
+      </div>
+
+      <div id="winToast" class="wintoast hidden"></div>
+      <div id="toast" class="toast hidden"></div>
+    </div>
+
+    <div class="dpad" id="dpad" aria-hidden="true">
+      <button data-dir="0" class="dbtn up" aria-label="Up">▲</button>
+      <button data-dir="3" class="dbtn left" aria-label="Left">◀</button>
+      <button data-dir="1" class="dbtn right" aria-label="Right">▶</button>
+      <button data-dir="2" class="dbtn down" aria-label="Down">▼</button>
+    </div>
+
+    <footer class="foot">
+      <div class="hints"><span>Arrows / WASD / swipe</span><span>·</span><span>P pause</span><span>·</span><span>R restart</span></div>
+      <div class="ver">Dual 2048 · build v2.3</div>
+    </footer>
+  </div>
+
+  <script src="game.js?v=2.3"></script>
+</body>
+</html>

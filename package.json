@@ -1,0 +1,14 @@
+{
+  "name": "dual-2048",
+  "version": "2.3.0",
+  "private": true,
+  "description": "Dual 2048 — two tile lineages, walls, and a global leaderboard. Zero dependencies.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
