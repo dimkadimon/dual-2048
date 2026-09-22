@@ -719,11 +719,25 @@
 
   async function kvGet(key) {
     const res = await fetch(KV_BASE + '/' + key, { cache: 'no-store' });
+    if (res.status === 404) return [];
     if (!res.ok) throw new Error('kv get failed');
     const txt = (await res.text()).trim();
     if (!txt) return [];
     const arr = JSON.parse(txt);
     return Array.isArray(arr) ? arr : [];
+  }
+
+  /* null = read FAILED (never overwrite such a key); array = known state */
+  async function kvGetSafe(key) {
+    try {
+      const res = await fetch(KV_BASE + '/' + key, { cache: 'no-store' });
+      if (res.status === 404) return [];
+      if (!res.ok) return null;
+      const txt = (await res.text()).trim();
+      if (!txt) return [];
+      const arr = JSON.parse(txt);
+      return Array.isArray(arr) ? arr : null;
+    } catch (e) { return null; }
   }
 
   async function kvPut(key, list) {
@@ -836,16 +850,20 @@
     try {
       const entry = { name: String(name).replace(/[<>]/g, '').trim().slice(0, 16) || 'ANON', score, maxTile, ts: Date.now() };
       const day = 'arc-' + new Date(entry.ts).toISOString().slice(0, 10);
-      const [top, dayList] = await Promise.all([
-        kvGet('top').catch(() => []),
-        kvGet(day).catch(() => [])
-      ]);
-      const newTop = top.concat([entry]).sort((a, b) => b.score - a.score || a.ts - b.ts).slice(0, HOF_CAP);
-      const newDay = dayList.concat([entry]);
-      await Promise.all([kvPut(day, newDay), kvPut('top', newTop)]);
-      const rank = newTop.findIndex((e) => e === entry) + 1 || newTop.filter((e) => e.score > entry.score).length + 1;
-      const isPB = !newTop.some((e) => e !== entry && String(e.name).toLowerCase() === entry.name.toLowerCase() && e.score > entry.score);
-      return { ok: true, rank, total: newTop.length, isPB };
+      const [top, dayList] = await Promise.all([kvGetSafe('top'), kvGetSafe(day)]);
+      if (top === null && dayList === null) return null; // store unreachable — never clobber
+      const writes = [];
+      let newTop = null;
+      if (top !== null) {
+        newTop = top.concat([entry]).sort((a, b) => b.score - a.score || a.ts - b.ts).slice(0, HOF_CAP);
+        writes.push(kvPut('top', newTop));
+      }
+      if (dayList !== null) writes.push(kvPut(day, dayList.concat([entry])));
+      await Promise.all(writes);
+      const ref = newTop || top || [];
+      const rank = ref.findIndex((e) => e === entry) + 1 || ref.filter((e) => e.score > entry.score).length + 1;
+      const isPB = !ref.some((e) => e !== entry && String(e.name).toLowerCase() === entry.name.toLowerCase() && e.score > entry.score);
+      return { ok: true, rank, total: ref.length, isPB };
     } catch (e) {
       return null;
     }

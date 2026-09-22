@@ -39,10 +39,13 @@ const MIME = {
 
 /* ---------------- shared KV store (optional) ---------------- */
 
+/* Returns: array = known state (404 → empty), null = READ FAILED.
+   Writers must never overwrite a key whose read failed. */
 async function kvGet(key) {
   if (!KV_BASE) return null;
   try {
     const r = await fetch(KV_BASE + '/' + key, { cache: 'no-store' });
+    if (r.status === 404) return [];
     if (!r.ok) return null;
     const t = (await r.text()).trim();
     if (!t) return [];
@@ -94,9 +97,15 @@ function kvSerial(fn) {
 async function kvSubmit(entry) {
   const day = 'arc-' + new Date(entry.ts).toISOString().slice(0, 10);
   const [top, dayList] = await Promise.all([kvGet('top'), kvGet(day)]);
-  const newTop = applyCaps((top || []).concat([entry]));
-  const newDay = (dayList || []).concat([entry]);
-  await Promise.all([kvPut(day, newDay), kvPut('top', newTop)]);
+  if (top === null && dayList === null) return null; // store unreachable — don't guess, don't clobber
+  const writes = [];
+  let newTop = null;
+  if (top !== null) {
+    newTop = applyCaps(top.concat([entry]));
+    writes.push(kvPut('top', newTop));
+  }
+  if (dayList !== null) writes.push(kvPut(day, dayList.concat([entry])));
+  await Promise.all(writes);
   return newTop;
 }
 
@@ -135,7 +144,8 @@ async function loadScores() {
       kvPut('top', merged);
       return merged;
     }
-    if (local.length) { kvPut('top', local); return applyCaps(local); } // seed an empty shared store
+    if (kv === null) { /* shared store unreachable — never seed over unknown state */ }
+    else if (local.length) { kvPut('top', local); return applyCaps(local); } // seed an empty shared store
   }
 
   if (local.length) return applyCaps(local);
@@ -210,11 +220,11 @@ const server = http.createServer(async (req, res) => {
         const today = 'arc-' + new Date().toISOString().slice(0, 10);
         const [remote, dayList, log] = await Promise.all([kvGet('top'), kvGet(today), kvGet('scores')]);
         const pool = (remote || []).concat(dayList || [], log || []);
-        if (pool.length) {
+        if (remote !== null && pool.length) {
           const seen = new Set(pool.map((e) => e.ts + '|' + e.name));
           const merged = applyCaps(pool.concat(scores.filter((e) => !seen.has(e.ts + '|' + e.name))));
           // self-heal: if the hall-of-fame lost entries to a stale writer, push the union back
-          if (JSON.stringify(merged) !== JSON.stringify(applyCaps(remote || []))) await kvPut('top', merged);
+          if (JSON.stringify(merged) !== JSON.stringify(applyCaps(remote))) await kvPut('top', merged);
           scores = merged;
         }
       });
