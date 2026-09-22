@@ -153,11 +153,15 @@ let scores = [];
 
 /* ---------------- simple rate limit ---------------- */
 
+const RATE_MS = parseInt(process.env.RATE_MS || '1500', 10);
+const HUB_SELF = process.env.HUB_SELF === '1';
+const HUB_API = 'https://dual-2048.onrender.com/api/scores'; // single serialized writer for the shared board
+
 const lastPost = new Map(); // ip -> ts
 function rateOk(ip) {
   const now = Date.now();
   const prev = lastPost.get(ip) || 0;
-  if (now - prev < 1500) return false;
+  if (now - prev < RATE_MS) return false;
   lastPost.set(ip, now);
   if (lastPost.size > 5000) lastPost.clear();
   return true;
@@ -244,6 +248,23 @@ const server = http.createServer(async (req, res) => {
       return sendJSON(res, 400, { ok: false, error: 'invalid score' });
     }
     const entry = { name: sanitizeName(payload.name), score, maxTile, ts: Date.now() };
+
+    // non-hub deployments forward to the hub so exactly one writer touches the KV store
+    const isHub = HUB_SELF || (req.headers.host || '').endsWith('dual-2048.onrender.com');
+    if (KV_BASE && !isHub) {
+      try {
+        const fr = await fetch(HUB_API, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: payload.name, score: payload.score, maxTile: payload.maxTile })
+        });
+        if (fr.ok) {
+          const j = await fr.json();
+          res.setHeader('Access-Control-Allow-Origin', '*');
+          return sendJSON(res, 200, j);
+        }
+      } catch (e) { /* hub asleep — write locally as fallback */ }
+    }
 
     // hall-of-fame + sharded log first so reads see this write (serialized: one writer at a time)
     let hof = null;
