@@ -117,7 +117,10 @@ async function kvSubmit(entry) {
     newTop = applyCaps(top.concat([entry]));
     writes.push(kvPut('top', newTop));
   }
-  if (dayList !== null) writes.push(kvPut(day, dayList.concat([entry])));
+  if (dayList !== null) {
+    const ek = entry.ts + '|' + entry.name;
+    writes.push(kvPut(day, dayList.some((e) => e.ts + '|' + e.name === ek) ? dayList : dayList.concat([entry])));
+  }
   await Promise.all(writes);
   return newTop;
 }
@@ -152,9 +155,10 @@ async function loadScores() {
       // merge local + shared so neither side's entries are lost, then push the
       // superset back so every deployment converges on the same board
       const seen = new Set(kv.map((e) => e.ts + '|' + e.name));
-      const merged = applyCaps(kv.concat(local.filter((e) => !seen.has(e.ts + '|' + e.name))));
+      const extra = local.filter((e) => !seen.has(e.ts + '|' + e.name));
+      const merged = applyCaps(kv.concat(extra));
       saveFile(merged);
-      kvPut('top', merged);
+      if (extra.length) kvPut('top', merged); // only write when boot actually adds entries
       return merged;
     }
     if (kv === null) { /* shared store unreachable — never seed over unknown state */ }
@@ -168,8 +172,18 @@ async function loadScores() {
 }
 
 function applyCaps(list) {
-  list.sort((a, b) => b.score - a.score || a.ts - b.ts);
-  return list.slice(0, MAX_STORED);
+  // idempotent: same ts|name can only ever appear once, no matter how many
+  // times an entry gets appended by retries or stale reads
+  const seen = new Set();
+  const uniq = [];
+  for (const e of list) {
+    const k = e.ts + '|' + e.name;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    uniq.push(e);
+  }
+  uniq.sort((a, b) => b.score - a.score || a.ts - b.ts);
+  return uniq.slice(0, MAX_STORED);
 }
 
 let scores = [];
@@ -233,11 +247,10 @@ const server = http.createServer(async (req, res) => {
         const { top: remote, day: dayList } = await kvRefresh();
         const pool = (remote || []).concat(dayList || []);
         if (remote !== null && pool.length) {
+          // READ-ONLY merge for the served view. GET must never write to the
+          // store: a "heal" rewrite here caused a storm that bred duplicates.
           const seen = new Set(pool.map((e) => e.ts + '|' + e.name));
-          const merged = applyCaps(pool.concat(scores.filter((e) => !seen.has(e.ts + '|' + e.name))));
-          // self-heal: if the hall-of-fame lost entries to a stale writer, push the union back
-          if (JSON.stringify(merged) !== JSON.stringify(applyCaps(remote))) await kvPut('top', merged);
-          scores = merged;
+          scores = applyCaps(pool.concat(scores.filter((e) => !seen.has(e.ts + '|' + e.name))));
         }
       });
     }

@@ -826,9 +826,21 @@
     }
   }
 
+  function dedupeScores(list) {
+    const seen = new Set();
+    const out = [];
+    for (const e of list || []) {
+      const k = e.ts + '|' + e.name;
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push(e);
+    }
+    return out;
+  }
+
   function renderGlobal() {
     const msg = 'No global scores yet — claim #1!';
-    const top = globalCache.slice(0, 100); // in-game shows the top 100; board.html shows the full archive
+    const top = dedupeScores(globalCache).slice(0, 100); // in-game shows the top 100; board.html shows the full archive
     populateList($('globalList'), top, msg);
     populateList($('overGlobalList'), top, msg);
   }
@@ -891,7 +903,7 @@
       const list = await kvGetSafe(day);
       if (list === null) { await sleep(300); continue; }
       if (!list.some((e) => sameEntry(e, entry))) {
-        try { await kvPut(day, list.concat([entry])); } catch (e) { await sleep(300); continue; }
+        try { await kvPut(day, dedupeScores(list.concat([entry]))); } catch (e) { await sleep(300); continue; }
       }
       const chk = await kvGetSafe(day);
       if (chk && chk.some((e) => sameEntry(e, entry))) return true;
@@ -906,7 +918,7 @@
       const list = await kvGetSafe('top');
       if (list === null) { await sleep(300); continue; }
       if (!list.some((e) => sameEntry(e, entry))) {
-        const nl = list.concat([entry]).sort((a, b) => b.score - a.score || a.ts - b.ts).slice(0, HOF_CAP);
+        const nl = dedupeScores(list.concat([entry])).sort((a, b) => b.score - a.score || a.ts - b.ts).slice(0, HOF_CAP);
         if (!nl.some((e) => sameEntry(e, entry))) return true; // capped out — nothing to write
         try { await kvPut('top', nl); } catch (e) { continue; }
       }
