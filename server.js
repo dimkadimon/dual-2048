@@ -106,24 +106,57 @@ function kvSerial(fn) {
   return p;
 }
 
+/* ---- top is a DERIVED cache; the day shards are the source of truth ---- */
+const TOP_MIN = parseInt(process.env.TOP_MIN || '500', 10);
+
+async function readAllShards() {
+  const now = Date.now();
+  const keys = [];
+  for (let i = 0; i <= 31; i++) keys.push('arc-' + new Date(now - i * 86400000).toISOString().slice(0, 10));
+  const lists = await Promise.all(keys.map((k) => kvGet(k)));
+  const out = [];
+  for (const l of lists) if (l) out.push(...l);
+  return out;
+}
+
+/* Rebuild the hall-of-fame from the union of every shard + the current top.
+   Immune to stale/clobbered top replicas: shards always replenish it. */
+async function rebuildTop() {
+  const [top, shardPool] = await Promise.all([kvGet('top'), readAllShards()]);
+  const topUniq = applyCaps(top || []);
+  const union = applyCaps(topUniq.concat(shardPool));
+  const key = (l) => l.map((e) => e.ts + '|' + e.name).join(',');
+  if (union.length >= topUniq.length && key(union) !== key(topUniq)) {
+    const ok = await kvPut('top', union);
+    return ok ? union : topUniq;
+  }
+  return topUniq;
+}
+
 /* Append a score: hall-of-fame key + today's day shard (arc-YYYY-MM-DD).
    Day shards are the full archive; the store's TTL rotates them after ~30 days. */
 async function kvSubmit(entry) {
   const day = 'arc-' + new Date(entry.ts).toISOString().slice(0, 10);
   let [top, dayList] = await Promise.all([kvGet('top'), kvGet(day)]);
   if (top === null || dayList === null) {
-    // kvdb intermittently 429s this IP — retry the failed reads once
+    // kvdb intermittently serves stale/429 from this IP — retry failed reads once
     await new Promise((r) => setTimeout(r, 600));
     if (top === null) top = await kvGet('top');
     if (dayList === null) dayList = await kvGet(day);
   }
-  if (top === null || dayList === null) return null; // unknown state — never write blind
-  const newTop = applyCaps(top.concat([entry]));
+  if (dayList === null) return null; // unknown day state — never write blind
+  let base = applyCaps(top || []);
+  if (top === null || base.length < TOP_MIN || (top && top.length !== base.length)) {
+    // top is missing, suspiciously small, or duplicate-riddled (stale replica)
+    const rebuilt = await rebuildTop();
+    if (rebuilt.length >= base.length) base = rebuilt;
+  }
+  const newTop = applyCaps(base.concat([entry]));
   const ek = entry.ts + '|' + entry.name;
   const topOk = await kvPut('top', newTop);
   const dayOk = await kvPut(day, dayList.some((e) => e.ts + '|' + e.name === ek) ? dayList : dayList.concat([entry]));
-  // honest result: both reads AND both writes must succeed, otherwise report
-  // failure (503) so the client persists directly instead of believing a lie
+  // honest result: both writes must succeed, otherwise report failure (503) so
+  // the client persists directly instead of believing a lie
   if (!topOk || !dayOk) return null;
   return newTop;
 }
@@ -364,6 +397,24 @@ const server = http.createServer(async (req, res) => {
 
 (async () => {
   scores = applyCaps(await loadScores());
+  if (KV_BASE) {
+    // Day shards are the source of truth; 'top' is a derived cache. Rebuild it
+    // at boot and every 30 min so stale/clobbered replicas self-heal.
+    const rebuild = () => kvSerial(async () => {
+      try {
+        const r = await rebuildTop();
+        if (r && r.length) {
+          const seen = new Set(r.map((e) => e.ts + '|' + e.name));
+          scores = applyCaps(r.concat(scores.filter((e) => !seen.has(e.ts + '|' + e.name))));
+          console.log('top rebuilt from shards:', r.length, 'entries');
+        }
+      } catch (e) {
+        console.error('top rebuild failed:', e.message);
+      }
+    });
+    rebuild();
+    setInterval(rebuild, 30 * 60 * 1000);
+  }
   server.listen(PORT, HOST, () => {
     console.log(`Dual 2048 running at http://${HOST}:${PORT}` + (KV_URL ? ' (KV sync on)' : ''));
   });

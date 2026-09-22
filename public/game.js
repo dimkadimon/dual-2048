@@ -914,11 +914,14 @@
     return false;
   }
 
-  /* Best-effort hall-of-fame insert (entry may legitimately fall outside the cap). */
+  /* Best-effort hall-of-fame insert (entry may legitimately fall outside the cap).
+     'top' is a derived cache — if the replica we read is duplicate-riddled
+     (stale/corrupt), skip writing and let the hub's shard rebuild heal it. */
   async function kvTopInsert(entry) {
     for (let i = 0; i < 2; i++) {
       const list = await kvGetSafe('top');
       if (list === null) { await sleep(300); continue; }
+      if (dedupeScores(list).length !== list.length) return true;
       if (!list.some((e) => sameEntry(e, entry))) {
         const nl = dedupeScores(list.concat([entry])).sort((a, b) => b.score - a.score || a.ts - b.ts).slice(0, HOF_CAP);
         if (!nl.some((e) => sameEntry(e, entry))) return true; // capped out — nothing to write
