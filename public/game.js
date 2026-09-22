@@ -847,6 +847,7 @@
 
   async function submitGlobal(name, score, maxTile) {
     if (!score) return null;
+    let hubDown = false; // same-origin hub answered 503 → skip the cross-origin retry of the same server
     // 1) same-origin Node API
     try {
       const ctrl = new AbortController();
@@ -859,9 +860,10 @@
       });
       clearTimeout(to);
       if (res.ok) return await res.json();
+      if (res.status === 503) hubDown = true;
     } catch (e) { /* fall through */ }
     // 2) shared hub API (cross-origin) — single serialized writer, no clobbering
-    try {
+    if (!hubDown) try {
       const ctrl = new AbortController();
       const to = setTimeout(() => ctrl.abort(), 6000);
       const res = await fetch(HUB_API, {

@@ -68,17 +68,18 @@ async function kvGetRaw(key) {
 }
 
 async function kvPut(key, list) {
-  if (!KV_BASE) return;
+  if (!KV_BASE) return false;
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       const r = await fetch(KV_BASE + '/' + key, { method: 'PUT', body: JSON.stringify(list) });
-      if (r.ok) return;
+      if (r.ok) return true;
       console.error('kv put failed:', key, r.status, (await r.text()).slice(0, 120));
     } catch (e) {
       console.error('kv sync failed:', key, e.message);
     }
     await new Promise((r) => setTimeout(r, 400));
   }
+  return false;
 }
 
 /* Throttled KV refresh: kvdb rate-limits chatty IPs, so we read the shared
@@ -111,17 +112,20 @@ async function kvSubmit(entry) {
   const day = 'arc-' + new Date(entry.ts).toISOString().slice(0, 10);
   const [top, dayList] = await Promise.all([kvGet('top'), kvGet(day)]);
   if (top === null && dayList === null) return null; // store unreachable — don't guess, don't clobber
-  const writes = [];
   let newTop = null;
+  let topOk = true;
+  let dayOk = true;
   if (top !== null) {
     newTop = applyCaps(top.concat([entry]));
-    writes.push(kvPut('top', newTop));
+    topOk = await kvPut('top', newTop);
   }
   if (dayList !== null) {
     const ek = entry.ts + '|' + entry.name;
-    writes.push(kvPut(day, dayList.some((e) => e.ts + '|' + e.name === ek) ? dayList : dayList.concat([entry])));
+    dayOk = await kvPut(day, dayList.some((e) => e.ts + '|' + e.name === ek) ? dayList : dayList.concat([entry]));
   }
-  await Promise.all(writes);
+  // honest result: if any intended write failed, report failure so the client
+  // persists directly instead of believing a score was stored
+  if (!topOk || !dayOk) return null;
   return newTop;
 }
 
