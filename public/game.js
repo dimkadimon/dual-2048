@@ -773,17 +773,21 @@
 
   let globalCache = [];
   async function fetchGlobal() {
-    // 1) same-origin Node API
+    // 1) same-origin Node API (only trust it if it actually has data —
+    //    a server whose KV access is throttled would otherwise answer "empty")
     try {
       const ctrl = new AbortController();
       const to = setTimeout(() => ctrl.abort(), 4000);
       const res = await fetch('/api/scores', { signal: ctrl.signal });
       clearTimeout(to);
-      if (!res.ok) throw new Error('bad status');
-      const data = await res.json();
-      globalCache = data.scores || [];
-      renderGlobal();
-      return;
+      if (res.ok) {
+        const data = await res.json();
+        if ((data.scores || []).length) {
+          globalCache = data.scores;
+          renderGlobal();
+          return;
+        }
+      }
     } catch (e) { /* fall through */ }
     // 2) kvdb hall-of-fame direct (source of truth; browser IPs aren't throttled)
     try {
@@ -860,27 +864,55 @@
         if (j && j.ok) return j; // hub said "stored" — done
       }
     } catch (e) { /* fall through to kv mode */ }
-    // 3) kvdb fallback (hub asleep): hall-of-fame + day shards
+    // 3) kvdb fallback (hub asleep / hub KV throttled): verified appends with retry
     try {
       const entry = { name: String(name).replace(/[<>]/g, '').trim().slice(0, 16) || 'ANON', score, maxTile, ts: Date.now() };
-      const day = 'arc-' + new Date(entry.ts).toISOString().slice(0, 10);
-      const [top, dayList] = await Promise.all([kvGetSafe('top'), kvGetSafe(day)]);
-      if (top === null && dayList === null) return null; // store unreachable — never clobber
-      const writes = [];
-      let newTop = null;
-      if (top !== null) {
-        newTop = top.concat([entry]).sort((a, b) => b.score - a.score || a.ts - b.ts).slice(0, HOF_CAP);
-        writes.push(kvPut('top', newTop));
-      }
-      if (dayList !== null) writes.push(kvPut(day, dayList.concat([entry])));
-      await Promise.all(writes);
-      const ref = newTop || top || [];
-      const rank = ref.findIndex((e) => e === entry) + 1 || ref.filter((e) => e.score > entry.score).length + 1;
-      const isPB = !ref.some((e) => e !== entry && String(e.name).toLowerCase() === entry.name.toLowerCase() && e.score > entry.score);
-      return { ok: true, rank, total: ref.length, isPB };
+      const dayOk = await kvAppendDay(entry);
+      await kvTopInsert(entry);
+      if (!dayOk) return null;
+      const ref = (await kvGetSafe('top')) || [];
+      const rank = ref.findIndex((e) => e.ts === entry.ts && e.name === entry.name) + 1 ||
+                   ref.filter((e) => e.score > entry.score).length + 1;
+      const isPB = !ref.some((e) => e.ts !== entry.ts && String(e.name).toLowerCase() === entry.name.toLowerCase() && e.score > entry.score);
+      return { ok: true, rank: rank || ref.length, total: ref.length, isPB };
     } catch (e) {
       return null;
     }
+  }
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const sameEntry = (e, x) => e.ts === x.ts && e.name === x.name;
+
+  /* Append to today's shard and VERIFY it stuck; retry if a concurrent
+     writer clobbered us or a read failed. */
+  async function kvAppendDay(entry) {
+    const day = 'arc-' + new Date(entry.ts).toISOString().slice(0, 10);
+    for (let i = 0; i < 3; i++) {
+      const list = await kvGetSafe(day);
+      if (list === null) { await sleep(300); continue; }
+      if (!list.some((e) => sameEntry(e, entry))) {
+        try { await kvPut(day, list.concat([entry])); } catch (e) { await sleep(300); continue; }
+      }
+      const chk = await kvGetSafe(day);
+      if (chk && chk.some((e) => sameEntry(e, entry))) return true;
+      await sleep(250);
+    }
+    return false;
+  }
+
+  /* Best-effort hall-of-fame insert (entry may legitimately fall outside the cap). */
+  async function kvTopInsert(entry) {
+    for (let i = 0; i < 2; i++) {
+      const list = await kvGetSafe('top');
+      if (list === null) { await sleep(300); continue; }
+      if (!list.some((e) => sameEntry(e, entry))) {
+        const nl = list.concat([entry]).sort((a, b) => b.score - a.score || a.ts - b.ts).slice(0, HOF_CAP);
+        if (!nl.some((e) => sameEntry(e, entry))) return true; // capped out — nothing to write
+        try { await kvPut('top', nl); } catch (e) { continue; }
+      }
+      return true;
+    }
+    return false;
   }
 
   function escapeHtml(s) {
