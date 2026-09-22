@@ -110,21 +110,20 @@ function kvSerial(fn) {
    Day shards are the full archive; the store's TTL rotates them after ~30 days. */
 async function kvSubmit(entry) {
   const day = 'arc-' + new Date(entry.ts).toISOString().slice(0, 10);
-  const [top, dayList] = await Promise.all([kvGet('top'), kvGet(day)]);
-  if (top === null && dayList === null) return null; // store unreachable — don't guess, don't clobber
-  let newTop = null;
-  let topOk = true;
-  let dayOk = true;
-  if (top !== null) {
-    newTop = applyCaps(top.concat([entry]));
-    topOk = await kvPut('top', newTop);
+  let [top, dayList] = await Promise.all([kvGet('top'), kvGet(day)]);
+  if (top === null || dayList === null) {
+    // kvdb intermittently 429s this IP — retry the failed reads once
+    await new Promise((r) => setTimeout(r, 600));
+    if (top === null) top = await kvGet('top');
+    if (dayList === null) dayList = await kvGet(day);
   }
-  if (dayList !== null) {
-    const ek = entry.ts + '|' + entry.name;
-    dayOk = await kvPut(day, dayList.some((e) => e.ts + '|' + e.name === ek) ? dayList : dayList.concat([entry]));
-  }
-  // honest result: if any intended write failed, report failure so the client
-  // persists directly instead of believing a score was stored
+  if (top === null || dayList === null) return null; // unknown state — never write blind
+  const newTop = applyCaps(top.concat([entry]));
+  const ek = entry.ts + '|' + entry.name;
+  const topOk = await kvPut('top', newTop);
+  const dayOk = await kvPut(day, dayList.some((e) => e.ts + '|' + e.name === ek) ? dayList : dayList.concat([entry]));
+  // honest result: both reads AND both writes must succeed, otherwise report
+  // failure (503) so the client persists directly instead of believing a lie
   if (!topOk || !dayOk) return null;
   return newTop;
 }
