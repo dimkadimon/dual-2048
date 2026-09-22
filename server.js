@@ -66,11 +66,27 @@ async function kvGetRaw(key) {
 
 async function kvPut(key, list) {
   if (!KV_BASE) return;
-  try {
-    await fetch(KV_BASE + '/' + key, { method: 'PUT', body: JSON.stringify(list) });
-  } catch (e) {
-    console.error('kv sync failed:', e.message);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const r = await fetch(KV_BASE + '/' + key, { method: 'PUT', body: JSON.stringify(list) });
+      if (r.ok) return;
+      console.error('kv put failed:', key, r.status, (await r.text()).slice(0, 120));
+    } catch (e) {
+      console.error('kv sync failed:', key, e.message);
+    }
+    await new Promise((r) => setTimeout(r, 400));
   }
+}
+
+/* Serialize all KV read-modify-writes through one queue: concurrent
+   requests must never interleave their read→write windows or they
+   clobber each other's scores. */
+let kvLock = Promise.resolve();
+function kvSerial(fn) {
+  const run = () => fn();
+  const p = kvLock.then(run, run);
+  kvLock = p.catch(() => {});
+  return p;
 }
 
 /* Append a score: hall-of-fame key + today's day shard (arc-YYYY-MM-DD).
@@ -186,16 +202,18 @@ const server = http.createServer(async (req, res) => {
   // --- API ---
   if (p === '/api/scores' && req.method === 'GET') {
     if (KV_BASE) {
-      const today = 'arc-' + new Date().toISOString().slice(0, 10);
-      const [remote, dayList, log] = await Promise.all([kvGet('top'), kvGet(today), kvGet('scores')]);
-      const pool = (remote || []).concat(dayList || [], log || []);
-      if (pool.length) {
-        const seen = new Set(pool.map((e) => e.ts + '|' + e.name));
-        const merged = applyCaps(pool.concat(scores.filter((e) => !seen.has(e.ts + '|' + e.name))));
-        // self-heal: if the hall-of-fame lost entries to a stale writer, push the union back
-        if (JSON.stringify(merged) !== JSON.stringify(applyCaps(remote || []))) kvPut('top', merged);
-        scores = merged;
-      }
+      await kvSerial(async () => {
+        const today = 'arc-' + new Date().toISOString().slice(0, 10);
+        const [remote, dayList, log] = await Promise.all([kvGet('top'), kvGet(today), kvGet('scores')]);
+        const pool = (remote || []).concat(dayList || [], log || []);
+        if (pool.length) {
+          const seen = new Set(pool.map((e) => e.ts + '|' + e.name));
+          const merged = applyCaps(pool.concat(scores.filter((e) => !seen.has(e.ts + '|' + e.name))));
+          // self-heal: if the hall-of-fame lost entries to a stale writer, push the union back
+          if (JSON.stringify(merged) !== JSON.stringify(applyCaps(remote || []))) await kvPut('top', merged);
+          scores = merged;
+        }
+      });
     }
     res.setHeader('Access-Control-Allow-Origin', '*'); // let the board page union across deployments
     return sendJSON(res, 200, { ok: true, scores: scores.slice(0, 50) });
@@ -204,7 +222,8 @@ const server = http.createServer(async (req, res) => {
   if (p === '/api/scores' && req.method === 'OPTIONS') {
     res.writeHead(204, {
       'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, OPTIONS',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type',
       'Access-Control-Max-Age': '86400'
     });
     return res.end();
@@ -226,9 +245,9 @@ const server = http.createServer(async (req, res) => {
     }
     const entry = { name: sanitizeName(payload.name), score, maxTile, ts: Date.now() };
 
-    // hall-of-fame + sharded log first so reads see this write
+    // hall-of-fame + sharded log first so reads see this write (serialized: one writer at a time)
     let hof = null;
-    if (KV_BASE) hof = await kvSubmit(entry);
+    if (KV_BASE) hof = await kvSerial(() => kvSubmit(entry));
     if (hof) {
       const seen = new Set(hof.map((e) => e.ts + '|' + e.name));
       scores = applyCaps(hof.concat(scores.filter((e) => !seen.has(e.ts + '|' + e.name))));
@@ -241,6 +260,7 @@ const server = http.createServer(async (req, res) => {
     const rank = ref.findIndex((e) => e === entry) + 1 ||
                  ref.filter((e) => e.score > entry.score).length + 1;
     const isPB = !ref.some((e) => e !== entry && String(e.name).toLowerCase() === entry.name.toLowerCase() && e.score > entry.score);
+    res.setHeader('Access-Control-Allow-Origin', '*'); // clients on any host may submit through this hub
     return sendJSON(res, 200, { ok: true, rank: rank || ref.length, total: ref.length, isPB });
   }
 

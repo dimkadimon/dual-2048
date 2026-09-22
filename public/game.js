@@ -727,8 +727,12 @@
   }
 
   async function kvPut(key, list) {
-    const res = await fetch(KV_BASE + '/' + key, { method: 'PUT', body: JSON.stringify(list) });
-    if (!res.ok) throw new Error('kv put failed');
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const res = await fetch(KV_BASE + '/' + key, { method: 'PUT', body: JSON.stringify(list) });
+      if (res.ok) return;
+      await new Promise((r) => setTimeout(r, 400));
+    }
+    throw new Error('kv put failed');
   }
 
   function populateList(el, entries, emptyMsg) {
@@ -767,7 +771,20 @@
       renderGlobal();
       return;
     } catch (e) { /* fall through to kv mode */ }
-    // 2) kvdb fallback (static deploy)
+    // 2) shared hub API (cross-origin)
+    try {
+      const ctrl = new AbortController();
+      const to = setTimeout(() => ctrl.abort(), 6000);
+      const res = await fetch(HUB_API, { signal: ctrl.signal });
+      clearTimeout(to);
+      if (res.ok) {
+        const data = await res.json();
+        globalCache = data.scores || [];
+        renderGlobal();
+        return;
+      }
+    } catch (e) { /* fall through */ }
+    // 3) kvdb fallback (static deploy / hub asleep)
     try {
       let list = await kvGet('top');
       if (!list.length) list = await kvGet('scores'); // pre-sharding / migration window
@@ -801,8 +818,21 @@
       });
       clearTimeout(to);
       if (res.ok) return await res.json();
+    } catch (e) { /* fall through */ }
+    // 2) shared hub API (cross-origin) — single serialized writer, no clobbering
+    try {
+      const ctrl = new AbortController();
+      const to = setTimeout(() => ctrl.abort(), 6000);
+      const res = await fetch(HUB_API, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, score, maxTile }),
+        signal: ctrl.signal
+      });
+      clearTimeout(to);
+      if (res.ok) return await res.json();
     } catch (e) { /* fall through to kv mode */ }
-    // 2) kvdb fallback (static deploy): hall-of-fame + day shards
+    // 3) kvdb fallback (hub asleep): hall-of-fame + day shards
     try {
       const entry = { name: String(name).replace(/[<>]/g, '').trim().slice(0, 16) || 'ANON', score, maxTile, ts: Date.now() };
       const day = 'arc-' + new Date(entry.ts).toISOString().slice(0, 10);
