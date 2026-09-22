@@ -81,6 +81,19 @@ async function kvPut(key, list) {
   }
 }
 
+/* Throttled KV refresh: kvdb rate-limits chatty IPs, so we read the shared
+   store at most once per KV_TTL ms and serve from memory in between. */
+const KV_TTL = parseInt(process.env.KV_TTL || '30000', 10);
+let kvCache = { at: 0, top: null, day: null };
+async function kvRefresh(force) {
+  const now = Date.now();
+  if (!force && now - kvCache.at < KV_TTL && kvCache.top !== undefined) return kvCache;
+  const today = 'arc-' + new Date().toISOString().slice(0, 10);
+  const [top, day] = await Promise.all([kvGet('top'), kvGet(today)]);
+  kvCache = { at: now, top, day };
+  return kvCache;
+}
+
 /* Serialize all KV read-modify-writes through one queue: concurrent
    requests must never interleave their read→write windows or they
    clobber each other's scores. */
@@ -217,9 +230,8 @@ const server = http.createServer(async (req, res) => {
   if (p === '/api/scores' && req.method === 'GET') {
     if (KV_BASE) {
       await kvSerial(async () => {
-        const today = 'arc-' + new Date().toISOString().slice(0, 10);
-        const [remote, dayList, log] = await Promise.all([kvGet('top'), kvGet(today), kvGet('scores')]);
-        const pool = (remote || []).concat(dayList || [], log || []);
+        const { top: remote, day: dayList } = await kvRefresh();
+        const pool = (remote || []).concat(dayList || []);
         if (remote !== null && pool.length) {
           const seen = new Set(pool.map((e) => e.ts + '|' + e.name));
           const merged = applyCaps(pool.concat(scores.filter((e) => !seen.has(e.ts + '|' + e.name))));
@@ -279,6 +291,13 @@ const server = http.createServer(async (req, res) => {
     // hall-of-fame + sharded log first so reads see this write (serialized: one writer at a time)
     let hof = null;
     if (KV_BASE) hof = await kvSerial(() => kvSubmit(entry));
+    if (KV_BASE && hof === null) {
+      // KV store unreachable from this instance — tell the client so IT writes
+      // directly instead of believing the score was persisted (prevents silent loss)
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      return sendJSON(res, 503, { ok: false, error: 'store unavailable' });
+    }
+    if (hof) kvCache = { at: 0, top: null, day: null }; // invalidate refresh cache
     if (hof) {
       const seen = new Set(hof.map((e) => e.ts + '|' + e.name));
       scores = applyCaps(hof.concat(scores.filter((e) => !seen.has(e.ts + '|' + e.name))));

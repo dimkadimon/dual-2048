@@ -784,8 +784,17 @@
       globalCache = data.scores || [];
       renderGlobal();
       return;
-    } catch (e) { /* fall through to kv mode */ }
-    // 2) shared hub API (cross-origin)
+    } catch (e) { /* fall through */ }
+    // 2) kvdb hall-of-fame direct (source of truth; browser IPs aren't throttled)
+    try {
+      const list = await kvGet('top');
+      if (list.length) {
+        globalCache = list;
+        renderGlobal();
+        return;
+      }
+    } catch (e) { /* fall through */ }
+    // 3) shared hub view
     try {
       const ctrl = new AbortController();
       const to = setTimeout(() => ctrl.abort(), 6000);
@@ -793,17 +802,19 @@
       clearTimeout(to);
       if (res.ok) {
         const data = await res.json();
-        globalCache = data.scores || [];
-        renderGlobal();
-        return;
+        if ((data.scores || []).length) {
+          globalCache = data.scores;
+          renderGlobal();
+          return;
+        }
       }
     } catch (e) { /* fall through */ }
-    // 3) kvdb fallback (static deploy / hub asleep)
+    // 4) kvdb legacy key
     try {
-      let list = await kvGet('top');
-      if (!list.length) list = await kvGet('scores'); // pre-sharding / migration window
+      const list = await kvGet('scores');
       globalCache = list;
       renderGlobal();
+      return;
     } catch (e) {
       const msg = 'Leaderboard offline — try again later!';
       populateList($('globalList'), [], msg);
@@ -844,7 +855,10 @@
         signal: ctrl.signal
       });
       clearTimeout(to);
-      if (res.ok) return await res.json();
+      if (res.ok) {
+        const j = await res.json();
+        if (j && j.ok) return j; // hub said "stored" — done
+      }
     } catch (e) { /* fall through to kv mode */ }
     // 3) kvdb fallback (hub asleep): hall-of-fame + day shards
     try {
