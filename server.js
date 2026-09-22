@@ -73,24 +73,14 @@ async function kvPut(key, list) {
   }
 }
 
-/* Append a score: hall-of-fame key + active log; seal the log into a
-   write-once arc-* shard when full (shards age out with the store's TTL). */
+/* Append a score: hall-of-fame key + today's day shard (arc-YYYY-MM-DD).
+   Day shards are the full archive; the store's TTL rotates them after ~30 days. */
 async function kvSubmit(entry) {
-  const [top, log] = await Promise.all([kvGet('top'), kvGet('scores')]);
+  const day = 'arc-' + new Date(entry.ts).toISOString().slice(0, 10);
+  const [top, dayList] = await Promise.all([kvGet('top'), kvGet(day)]);
   const newTop = applyCaps((top || []).concat([entry]));
-  const newLog = (log || []).concat([entry]);
-  if (newLog.length >= SEAL_AT) {
-    const id = 'arc-' + Date.now();
-    await kvPut(id, newLog);
-    await kvPut('scores', []);
-    const meta = (await kvGetRaw('meta')) || {};
-    const arcs = Array.isArray(meta.arcs) ? meta.arcs : [];
-    if (!arcs.includes(id)) arcs.push(id);
-    await kvPut('meta', { arcs });
-  } else {
-    await kvPut('scores', newLog);
-  }
-  await kvPut('top', newTop);
+  const newDay = (dayList || []).concat([entry]);
+  await Promise.all([kvPut(day, newDay), kvPut('top', newTop)]);
   return newTop;
 }
 
@@ -196,8 +186,9 @@ const server = http.createServer(async (req, res) => {
   // --- API ---
   if (p === '/api/scores' && req.method === 'GET') {
     if (KV_BASE) {
-      const [remote, log] = await Promise.all([kvGet('top'), kvGet('scores')]);
-      const pool = (remote || []).concat(log || []);
+      const today = 'arc-' + new Date().toISOString().slice(0, 10);
+      const [remote, dayList, log] = await Promise.all([kvGet('top'), kvGet(today), kvGet('scores')]);
+      const pool = (remote || []).concat(dayList || [], log || []);
       if (pool.length) {
         const seen = new Set(pool.map((e) => e.ts + '|' + e.name));
         const merged = applyCaps(pool.concat(scores.filter((e) => !seen.has(e.ts + '|' + e.name))));

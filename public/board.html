@@ -138,28 +138,42 @@
       return out;
     }
 
+    var DAYMS = 86400000, CACHE_KEY = 'dual2048-arc-cache', WINDOW = 34;
+    function dayKey(off) { return 'arc-' + new Date(Date.now() - off * DAYMS).toISOString().slice(0, 10); }
+    function setCache(cache) {
+      try { localStorage.setItem(CACHE_KEY, JSON.stringify(cache)); }
+      catch (e) {
+        var ks = Object.keys(cache).sort();
+        while (ks.length > 7) delete cache[ks.shift()];
+        try { localStorage.setItem(CACHE_KEY, JSON.stringify(cache)); } catch (e2) { /* give up */ }
+      }
+    }
+
     async function load() {
       $('status').textContent = 'loading…';
-      // full archive: hall-of-fame + active log + every sealed shard, plus the server view
-      var meta = null;
-      try {
-        var mr = await fetch(KV + '/meta', { cache: 'no-store' });
-        if (mr.ok) meta = JSON.parse(await mr.text());
-      } catch (e) { /* no meta yet */ }
-      var arcs = (meta && Array.isArray(meta.arcs)) ? meta.arcs : [];
-      var urls = [KV + '/top', KV + '/scores'].concat(arcs.slice(-60).map(function (a) { return KV + '/' + a; }));
+      // full archive = hall-of-fame + today's shard + cached past day-shards + legacy key + server view
+      var cache = {};
+      try { cache = JSON.parse(localStorage.getItem(CACHE_KEY) || '{}'); } catch (e) { /* fresh */ }
+      var missing = [];
+      for (var i = 1; i <= WINDOW; i++) { var k = dayKey(i); if (!Array.isArray(cache[k])) missing.push(k); }
+      var urls = [KV + '/top', KV + '/scores', KV + '/' + dayKey(0)]
+        .concat(missing.map(function (k) { return KV + '/' + k; }));
       var res = await Promise.all(urls.map(function (u) { return grab(u, false); }).concat([grab(API, true)]));
-      var list = [];
-      var shards = 0;
-      res.forEach(function (r) { if (r && r.length) { shards++; list = union(list, r); } });
-      var src = (res[0] ? 'board' : '') + (res[res.length - 1] ? '+server' : '');
+      var top = res[0], legacy = res[1], today = res[2];
+      missing.forEach(function (k, idx) { var L = res[3 + idx]; if (L && L.length) cache[k] = L; });
+      setCache(cache);
+      var list = [], shards = 0;
+      function add(L) { if (L && L.length) { shards++; list = union(list, L); } }
+      add(top); add(legacy); add(today);
+      for (var j = 1; j <= WINDOW; j++) add(cache[dayKey(j)]);
+      add(res[res.length - 1]); // server API view
       if (!list.length) {
         $('status').innerHTML = '<span class="err">board offline — try again</span>';
         return;
       }
       list.sort(function (a, b) { return b.score - a.score || a.ts - b.ts; });
       render(list);
-      $('status').textContent = list.length + ' scores · ' + shards + ' shards · ' + (src || 'cache') + ' · ' + new Date().toLocaleTimeString();
+      $('status').textContent = list.length + ' scores · ' + shards + ' shards · ' + new Date().toLocaleTimeString();
     }
 
     function render(list) {

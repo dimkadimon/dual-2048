@@ -715,7 +715,7 @@
         shared leaderboard. */
   const KV_BASE = 'https://kvdb.io/WFqmZseFLUPww2FWnuzBWs';
   const HOF_CAP = 2000; // hall-of-fame key ("top") size — permanent, rewritten every submit
-  const SEAL_AT = 2000; // active log ("scores") seals into a write-once arc-* shard at this size
+  // full archive lives in day shards: arc-YYYY-MM-DD (kvdb TTL rotates them after ~30 days)
 
   async function kvGet(key) {
     const res = await fetch(KV_BASE + '/' + key, { cache: 'no-store' });
@@ -802,30 +802,17 @@
       clearTimeout(to);
       if (res.ok) return await res.json();
     } catch (e) { /* fall through to kv mode */ }
-    // 2) kvdb fallback (static deploy): hall-of-fame + sharded append log
+    // 2) kvdb fallback (static deploy): hall-of-fame + day shards
     try {
       const entry = { name: String(name).replace(/[<>]/g, '').trim().slice(0, 16) || 'ANON', score, maxTile, ts: Date.now() };
-      const [top, log] = await Promise.all([
+      const day = 'arc-' + new Date(entry.ts).toISOString().slice(0, 10);
+      const [top, dayList] = await Promise.all([
         kvGet('top').catch(() => []),
-        kvGet('scores').catch(() => [])
+        kvGet(day).catch(() => [])
       ]);
       const newTop = top.concat([entry]).sort((a, b) => b.score - a.score || a.ts - b.ts).slice(0, HOF_CAP);
-      const newLog = log.concat([entry]);
-      if (newLog.length >= SEAL_AT) {
-        const id = 'arc-' + Date.now();
-        await kvPut(id, newLog);
-        await kvPut('scores', []);
-        let arcs = [];
-        try {
-          const mr = await fetch(KV_BASE + '/meta', { cache: 'no-store' });
-          if (mr.ok) { const mj = JSON.parse(await mr.text()); if (mj && Array.isArray(mj.arcs)) arcs = mj.arcs; }
-        } catch (e) { /* fresh meta */ }
-        if (!arcs.includes(id)) arcs.push(id);
-        await kvPut('meta', { arcs });
-      } else {
-        await kvPut('scores', newLog);
-      }
-      await kvPut('top', newTop);
+      const newDay = dayList.concat([entry]);
+      await Promise.all([kvPut(day, newDay), kvPut('top', newTop)]);
       const rank = newTop.findIndex((e) => e === entry) + 1 || newTop.filter((e) => e.score > entry.score).length + 1;
       const isPB = !newTop.some((e) => e !== entry && String(e.name).toLowerCase() === entry.name.toLowerCase() && e.score > entry.score);
       return { ok: true, rank, total: newTop.length, isPB };
