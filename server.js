@@ -21,7 +21,9 @@ const ROOT = path.join(__dirname, 'public');
 const DATA_DIR = path.join(__dirname, 'data');
 const DATA_FILE = path.join(DATA_DIR, 'scores.json');
 const KV_URL = process.env.KV_URL || '';
-const MAX_STORED = 2000; // full archive of scores (no per-player cap)
+const KV_BASE = KV_URL.replace(/\/scores\/?$/, ''); // bucket base (keys: top, scores, arc-*, meta)
+const MAX_STORED = 2000; // hall-of-fame ("top") size
+const SEAL_AT = 2000;    // active log ("scores") seals into a write-once arc-* shard here
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -37,10 +39,10 @@ const MIME = {
 
 /* ---------------- shared KV store (optional) ---------------- */
 
-async function kvGet() {
-  if (!KV_URL) return null;
+async function kvGet(key) {
+  if (!KV_BASE) return null;
   try {
-    const r = await fetch(KV_URL, { cache: 'no-store' });
+    const r = await fetch(KV_BASE + '/' + key, { cache: 'no-store' });
     if (!r.ok) return null;
     const t = (await r.text()).trim();
     if (!t) return [];
@@ -51,13 +53,45 @@ async function kvGet() {
   }
 }
 
-async function kvPut(list) {
-  if (!KV_URL) return;
+async function kvGetRaw(key) {
+  if (!KV_BASE) return null;
   try {
-    await fetch(KV_URL, { method: 'PUT', body: JSON.stringify(list) });
+    const r = await fetch(KV_BASE + '/' + key, { cache: 'no-store' });
+    if (!r.ok) return null;
+    return JSON.parse(await r.text());
+  } catch (e) {
+    return null;
+  }
+}
+
+async function kvPut(key, list) {
+  if (!KV_BASE) return;
+  try {
+    await fetch(KV_BASE + '/' + key, { method: 'PUT', body: JSON.stringify(list) });
   } catch (e) {
     console.error('kv sync failed:', e.message);
   }
+}
+
+/* Append a score: hall-of-fame key + active log; seal the log into a
+   write-once arc-* shard when full (shards age out with the store's TTL). */
+async function kvSubmit(entry) {
+  const [top, log] = await Promise.all([kvGet('top'), kvGet('scores')]);
+  const newTop = applyCaps((top || []).concat([entry]));
+  const newLog = (log || []).concat([entry]);
+  if (newLog.length >= SEAL_AT) {
+    const id = 'arc-' + Date.now();
+    await kvPut(id, newLog);
+    await kvPut('scores', []);
+    const meta = (await kvGetRaw('meta')) || {};
+    const arcs = Array.isArray(meta.arcs) ? meta.arcs : [];
+    if (!arcs.includes(id)) arcs.push(id);
+    await kvPut('meta', { arcs });
+  } else {
+    await kvPut('scores', newLog);
+  }
+  await kvPut('top', newTop);
+  return newTop;
 }
 
 /* ---------------- leaderboard storage ---------------- */
@@ -84,18 +118,18 @@ async function loadScores() {
     if (Array.isArray(list)) local = list;
   } catch (e) { /* no local file yet */ }
 
-  if (KV_URL) {
-    const kv = await kvGet();
+  if (KV_BASE) {
+    const kv = await kvGet('top');
     if (kv && kv.length) {
       // merge local + shared so neither side's entries are lost, then push the
       // superset back so every deployment converges on the same board
       const seen = new Set(kv.map((e) => e.ts + '|' + e.name));
       const merged = applyCaps(kv.concat(local.filter((e) => !seen.has(e.ts + '|' + e.name))));
       saveFile(merged);
-      kvPut(merged);
+      kvPut('top', merged);
       return merged;
     }
-    if (local.length) { kvPut(local); return applyCaps(local); } // seed an empty shared store
+    if (local.length) { kvPut('top', local); return applyCaps(local); } // seed an empty shared store
   }
 
   if (local.length) return applyCaps(local);
@@ -161,13 +195,14 @@ const server = http.createServer(async (req, res) => {
 
   // --- API ---
   if (p === '/api/scores' && req.method === 'GET') {
-    if (KV_URL) {
-      const remote = await kvGet(); // shared store wins when configured
-      if (remote && remote.length) {
-        const seen = new Set(remote.map((e) => e.ts + '|' + e.name));
-        const merged = applyCaps(remote.concat(scores.filter((e) => !seen.has(e.ts + '|' + e.name))));
-        // self-heal: if the shared store lost entries to a stale writer, push the union back
-        if (JSON.stringify(merged) !== JSON.stringify(applyCaps(remote))) kvPut(merged);
+    if (KV_BASE) {
+      const [remote, log] = await Promise.all([kvGet('top'), kvGet('scores')]);
+      const pool = (remote || []).concat(log || []);
+      if (pool.length) {
+        const seen = new Set(pool.map((e) => e.ts + '|' + e.name));
+        const merged = applyCaps(pool.concat(scores.filter((e) => !seen.has(e.ts + '|' + e.name))));
+        // self-heal: if the hall-of-fame lost entries to a stale writer, push the union back
+        if (JSON.stringify(merged) !== JSON.stringify(applyCaps(remote || []))) kvPut('top', merged);
         scores = merged;
       }
     }
@@ -200,24 +235,22 @@ const server = http.createServer(async (req, res) => {
     }
     const entry = { name: sanitizeName(payload.name), score, maxTile, ts: Date.now() };
 
-    // merge with the shared store first so parallel deployments don't clobber each other
-    let base = scores;
-    if (KV_URL) {
-      const remote = await kvGet();
-      if (remote) {
-        const seen = new Set(scores.map((e) => e.ts + '|' + e.name));
-        base = scores.concat(remote.filter((e) => !seen.has(e.ts + '|' + e.name)));
-      }
+    // hall-of-fame + sharded log first so reads see this write
+    let hof = null;
+    if (KV_BASE) hof = await kvSubmit(entry);
+    if (hof) {
+      const seen = new Set(hof.map((e) => e.ts + '|' + e.name));
+      scores = applyCaps(hof.concat(scores.filter((e) => !seen.has(e.ts + '|' + e.name))));
+    } else {
+      scores = applyCaps(scores.concat([entry]));
     }
-    base.push(entry);
-    scores = applyCaps(base);
     saveFile(scores);
-    await kvPut(scores); // sync before responding so reads see this write
 
-    const rank = scores.findIndex((e) => e === entry) + 1 ||
-                 scores.filter((e) => e.score > entry.score).length + 1;
-    const isPB = !scores.some((e) => e !== entry && String(e.name).toLowerCase() === entry.name.toLowerCase() && e.score > entry.score);
-    return sendJSON(res, 200, { ok: true, rank: rank || scores.length, total: scores.length, isPB });
+    const ref = hof || scores;
+    const rank = ref.findIndex((e) => e === entry) + 1 ||
+                 ref.filter((e) => e.score > entry.score).length + 1;
+    const isPB = !ref.some((e) => e !== entry && String(e.name).toLowerCase() === entry.name.toLowerCase() && e.score > entry.score);
+    return sendJSON(res, 200, { ok: true, rank: rank || ref.length, total: ref.length, isPB });
   }
 
   if (p.startsWith('/api/')) return sendJSON(res, 404, { ok: false, error: 'not found' });

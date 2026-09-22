@@ -713,10 +713,12 @@
      2. free kvdb.io bucket fallback — lets the game run as a pure static
         deploy (surge.sh, Netlify, GitHub Pages, file://…) with a working
         shared leaderboard. */
-  const KV_URL = 'https://kvdb.io/WFqmZseFLUPww2FWnuzBWs/scores';
+  const KV_BASE = 'https://kvdb.io/WFqmZseFLUPww2FWnuzBWs';
+  const HOF_CAP = 2000; // hall-of-fame key ("top") size — permanent, rewritten every submit
+  const SEAL_AT = 2000; // active log ("scores") seals into a write-once arc-* shard at this size
 
-  async function kvGet() {
-    const res = await fetch(KV_URL, { cache: 'no-store' });
+  async function kvGet(key) {
+    const res = await fetch(KV_BASE + '/' + key, { cache: 'no-store' });
     if (!res.ok) throw new Error('kv get failed');
     const txt = (await res.text()).trim();
     if (!txt) return [];
@@ -724,8 +726,8 @@
     return Array.isArray(arr) ? arr : [];
   }
 
-  async function kvPut(list) {
-    const res = await fetch(KV_URL, { method: 'PUT', body: JSON.stringify(list) });
+  async function kvPut(key, list) {
+    const res = await fetch(KV_BASE + '/' + key, { method: 'PUT', body: JSON.stringify(list) });
     if (!res.ok) throw new Error('kv put failed');
   }
 
@@ -767,7 +769,9 @@
     } catch (e) { /* fall through to kv mode */ }
     // 2) kvdb fallback (static deploy)
     try {
-      globalCache = await kvGet();
+      let list = await kvGet('top');
+      if (!list.length) list = await kvGet('scores'); // pre-sharding / migration window
+      globalCache = list;
       renderGlobal();
     } catch (e) {
       const msg = 'Leaderboard offline — try again later!';
@@ -798,17 +802,33 @@
       clearTimeout(to);
       if (res.ok) return await res.json();
     } catch (e) { /* fall through to kv mode */ }
-    // 2) kvdb fallback (static deploy): read-modify-write the list
+    // 2) kvdb fallback (static deploy): hall-of-fame + sharded append log
     try {
       const entry = { name: String(name).replace(/[<>]/g, '').trim().slice(0, 16) || 'ANON', score, maxTile, ts: Date.now() };
-      const list = await kvGet();
-      list.push(entry);
-      list.sort((a, b) => b.score - a.score || a.ts - b.ts);
-      const capped = list.slice(0, 2000); // full archive — no per-player cap
-      await kvPut(capped);
-      const rank = capped.findIndex((e) => e === entry) + 1 || capped.filter((e) => e.score > entry.score).length + 1;
-      const isPB = !capped.some((e) => e !== entry && String(e.name).toLowerCase() === entry.name.toLowerCase() && e.score > entry.score);
-      return { ok: true, rank, total: capped.length, isPB };
+      const [top, log] = await Promise.all([
+        kvGet('top').catch(() => []),
+        kvGet('scores').catch(() => [])
+      ]);
+      const newTop = top.concat([entry]).sort((a, b) => b.score - a.score || a.ts - b.ts).slice(0, HOF_CAP);
+      const newLog = log.concat([entry]);
+      if (newLog.length >= SEAL_AT) {
+        const id = 'arc-' + Date.now();
+        await kvPut(id, newLog);
+        await kvPut('scores', []);
+        let arcs = [];
+        try {
+          const mr = await fetch(KV_BASE + '/meta', { cache: 'no-store' });
+          if (mr.ok) { const mj = JSON.parse(await mr.text()); if (mj && Array.isArray(mj.arcs)) arcs = mj.arcs; }
+        } catch (e) { /* fresh meta */ }
+        if (!arcs.includes(id)) arcs.push(id);
+        await kvPut('meta', { arcs });
+      } else {
+        await kvPut('scores', newLog);
+      }
+      await kvPut('top', newTop);
+      const rank = newTop.findIndex((e) => e === entry) + 1 || newTop.filter((e) => e.score > entry.score).length + 1;
+      const isPB = !newTop.some((e) => e !== entry && String(e.name).toLowerCase() === entry.name.toLowerCase() && e.score > entry.score);
+      return { ok: true, rank, total: newTop.length, isPB };
     } catch (e) {
       return null;
     }

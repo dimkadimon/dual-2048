@@ -98,14 +98,14 @@
 
     <footer>
       <a href="index.html">← back to the game</a> · refreshes every 30 s and on tab focus ·
-      full archive — every submitted score is kept ·
-      raw data: <a href="https://kvdb.io/WFqmZseFLUPww2FWnuzBWs/scores" target="_blank" rel="noopener">kvdb bucket</a>
+      full archive: every score kept in 30-day shards + permanent hall of fame ·
+      raw data: <a href="https://kvdb.io/WFqmZseFLUPww2FWnuzBWs/top" target="_blank" rel="noopener">kvdb bucket</a>
     </footer>
   </div>
 
   <script>
     'use strict';
-    var KV = 'https://kvdb.io/WFqmZseFLUPww2FWnuzBWs/scores';
+    var KV = 'https://kvdb.io/WFqmZseFLUPww2FWnuzBWs'; // bucket base
     var API = 'https://dual-2048.onrender.com/api/scores'; // secondary source (CORS-open)
     var $ = function (id) { return document.getElementById(id); };
     var esc = function (s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); };
@@ -140,16 +140,26 @@
 
     async function load() {
       $('status').textContent = 'loading…';
-      var res = await Promise.all([grab(KV, false), grab(API, true)]);
-      var list = union(res[0], res[1]);
-      var src = (res[0] ? 'board' : '') + (res[0] && res[1] ? '+' : '') + (res[1] ? 'server' : '');
+      // full archive: hall-of-fame + active log + every sealed shard, plus the server view
+      var meta = null;
+      try {
+        var mr = await fetch(KV + '/meta', { cache: 'no-store' });
+        if (mr.ok) meta = JSON.parse(await mr.text());
+      } catch (e) { /* no meta yet */ }
+      var arcs = (meta && Array.isArray(meta.arcs)) ? meta.arcs : [];
+      var urls = [KV + '/top', KV + '/scores'].concat(arcs.slice(-60).map(function (a) { return KV + '/' + a; }));
+      var res = await Promise.all(urls.map(function (u) { return grab(u, false); }).concat([grab(API, true)]));
+      var list = [];
+      var shards = 0;
+      res.forEach(function (r) { if (r && r.length) { shards++; list = union(list, r); } });
+      var src = (res[0] ? 'board' : '') + (res[res.length - 1] ? '+server' : '');
       if (!list.length) {
         $('status').innerHTML = '<span class="err">board offline — try again</span>';
         return;
       }
       list.sort(function (a, b) { return b.score - a.score || a.ts - b.ts; });
       render(list);
-      $('status').textContent = list.length + ' scores · ' + (src || 'cache') + ' · ' + new Date().toLocaleTimeString();
+      $('status').textContent = list.length + ' scores · ' + shards + ' shards · ' + (src || 'cache') + ' · ' + new Date().toLocaleTimeString();
     }
 
     function render(list) {
