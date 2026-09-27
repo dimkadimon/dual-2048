@@ -846,9 +846,24 @@
     return out;
   }
 
+  /* Display safety net: collapse same name+score clusters <10 min apart
+     (impossible as separate games — they are interrupted-submit doubles). */
+  function nearDedupe(list) {
+    const byTs = (list || []).slice().sort((a, b) => a.ts - b.ts);
+    const lastKept = new Map();
+    const drop = new Set();
+    for (const e of byTs) {
+      const gk = e.name + '|' + e.score;
+      const t = lastKept.get(gk);
+      if (t !== undefined && e.ts - t < 600000) { drop.add(e.ts + '|' + e.name); continue; }
+      lastKept.set(gk, e.ts);
+    }
+    return drop.size ? (list || []).filter((e) => !drop.has(e.ts + '|' + e.name)) : (list || []);
+  }
+
   function renderGlobal() {
     const msg = 'No global scores yet — claim #1!';
-    const top = dedupeScores(globalCache).slice(0, 100); // in-game shows the top 100; board.html shows the full archive
+    const top = nearDedupe(globalCache).slice(0, 100); // in-game shows the top 100; board.html shows the full archive
     populateList($('globalList'), top, msg);
     populateList($('overGlobalList'), top, msg);
   }

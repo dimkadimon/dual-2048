@@ -219,17 +219,26 @@ async function loadScores() {
   return s;
 }
 
-function applyCaps(list) {
-  // idempotent: same ts|name can only ever appear once, no matter how many
-  // times an entry gets appended by retries or stale reads
-  const seen = new Set();
-  const uniq = [];
-  for (const e of list) {
-    const k = e.ts + '|' + e.name;
-    if (seen.has(k)) continue;
-    seen.add(k);
-    uniq.push(e);
+/* Near-dupe filter: two entries with the same name+score less than 10 minutes
+   apart cannot be separate finished games — they are double-writes from an
+   interrupted submit. Keeps the earliest of each cluster, preserves input order. */
+function nearDedupe(list) {
+  const byTs = list.slice().sort((a, b) => a.ts - b.ts);
+  const lastKept = new Map();
+  const drop = new Set();
+  for (const e of byTs) {
+    const gk = e.name + '|' + e.score;
+    const t = lastKept.get(gk);
+    if (t !== undefined && e.ts - t < 600000) { drop.add(e.ts + '|' + e.name); continue; }
+    lastKept.set(gk, e.ts);
   }
+  return drop.size ? list.filter((e) => !drop.has(e.ts + '|' + e.name)) : list;
+}
+
+function applyCaps(list) {
+  // idempotent: same ts|name can only ever appear once, and same name+score
+  // clusters inside the impossible-replay window collapse to their first entry
+  const uniq = nearDedupe(list);
   uniq.sort((a, b) => b.score - a.score || a.ts - b.ts);
   return uniq.slice(0, MAX_STORED);
 }

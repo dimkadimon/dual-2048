@@ -138,7 +138,21 @@
       return out;
     }
 
-    var DAYMS = 86400000, CACHE_KEY = 'dual2048-arc-cache', WINDOW = 34;
+    /* Collapse interrupted-submit doubles: same name+score <10 min apart cannot
+       be separate finished games. Keeps the earliest, preserves input order. */
+    function nearDedupe(list) {
+      var byTs = (list || []).slice().sort(function (a, b) { return a.ts - b.ts; });
+      var lastKept = {}, drop = {}, dropped = false;
+      byTs.forEach(function (e) {
+        var gk = e.name + '|' + e.score;
+        if (lastKept[gk] !== undefined && e.ts - lastKept[gk] < 600000) { drop[e.ts + '|' + e.name] = 1; dropped = true; return; }
+        lastKept[gk] = e.ts;
+      });
+      return dropped ? (list || []).filter(function (e) { return !drop[e.ts + '|' + e.name]; }) : (list || []);
+    }
+
+    var DAYMS = 86400000, CACHE_KEY = 'dual2048-arc-cache-v2', WINDOW = 34;
+    try { localStorage.removeItem('dual2048-arc-cache'); } catch (e) { /* old cache from before the dedupe era — drop it */ }
     function dayKey(off) { return 'arc-' + new Date(Date.now() - off * DAYMS).toISOString().slice(0, 10); }
     function setCache(cache) {
       try { localStorage.setItem(CACHE_KEY, JSON.stringify(cache)); }
@@ -178,6 +192,7 @@
         return;
       }
       list.sort(function (a, b) { return b.score - a.score || a.ts - b.ts; });
+      list = nearDedupe(list); // collapse interrupted-submit doubles (same name+score <10 min apart)
       render(list);
       $('status').textContent = list.length + ' scores · ' + shards + ' shards · ' + new Date().toLocaleTimeString();
     }
