@@ -789,13 +789,21 @@
         }
       }
     } catch (e) { /* fall through */ }
-    // 2) kvdb hall-of-fame direct (source of truth; browser IPs aren't throttled)
+    // 2) kvdb direct: hall-of-fame ∪ last two day shards (browser IPs aren't
+    //    throttled; the shards surface plays newer than the last top rebuild)
     try {
-      const list = await kvGet('top');
-      if (list.length) {
-        globalCache = list;
-        renderGlobal();
-        return;
+      const d0 = 'arc-' + new Date().toISOString().slice(0, 10);
+      const d1 = 'arc-' + new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+      const parts = await Promise.all([kvGetSafe('top'), kvGetSafe(d0), kvGetSafe(d1)]);
+      const t = parts[0];
+      if (t !== null) {
+        const merged = dedupeScores(t.concat(parts[1] || [], parts[2] || []))
+          .sort((a, b) => b.score - a.score || a.ts - b.ts);
+        if (merged.length) {
+          globalCache = merged;
+          renderGlobal();
+          return;
+        }
       }
     } catch (e) { /* fall through */ }
     // 3) shared hub view
@@ -847,15 +855,19 @@
 
   async function submitGlobal(name, score, maxTile) {
     if (!score) return null;
+    // ONE timestamp for every path below: if the hub is slow and the fallback
+    // also writes, both produce the identical ts|name entry — idempotent, the
+    // same play can never be recorded twice
+    const ts = Date.now();
     let hubDown = false; // same-origin hub answered 503 → skip the cross-origin retry of the same server
     // 1) same-origin Node API
     try {
       const ctrl = new AbortController();
-      const to = setTimeout(() => ctrl.abort(), 4000);
+      const to = setTimeout(() => ctrl.abort(), 5000);
       const res = await fetch('/api/scores', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, score, maxTile }),
+        body: JSON.stringify({ name, score, maxTile, ts }),
         signal: ctrl.signal
       });
       clearTimeout(to);
@@ -865,11 +877,11 @@
     // 2) shared hub API (cross-origin) — single serialized writer, no clobbering
     if (!hubDown) try {
       const ctrl = new AbortController();
-      const to = setTimeout(() => ctrl.abort(), 6000);
+      const to = setTimeout(() => ctrl.abort(), 9000);
       const res = await fetch(HUB_API, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, score, maxTile }),
+        body: JSON.stringify({ name, score, maxTile, ts }),
         signal: ctrl.signal
       });
       clearTimeout(to);
@@ -880,7 +892,7 @@
     } catch (e) { /* fall through to kv mode */ }
     // 3) kvdb fallback (hub asleep / hub KV throttled): verified appends with retry
     try {
-      const entry = { name: String(name).replace(/[<>]/g, '').trim().slice(0, 16) || 'ANON', score, maxTile, ts: Date.now() };
+      const entry = { name: String(name).replace(/[<>]/g, '').trim().slice(0, 16) || 'ANON', score, maxTile, ts };
       const dayOk = await kvAppendDay(entry);
       await kvTopInsert(entry);
       if (!dayOk) return null;

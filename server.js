@@ -145,18 +145,30 @@ async function kvSubmit(entry) {
     if (dayList === null) dayList = await kvGet(day);
   }
   if (dayList === null) return null; // unknown day state — never write blind
-  let base = applyCaps(top || []);
-  if (top === null || base.length < TOP_MIN || (top && top.length !== base.length)) {
-    // top is missing, suspiciously small, or duplicate-riddled (stale replica)
-    const rebuilt = await rebuildTop();
-    if (rebuilt.length >= base.length) base = rebuilt;
+  const base = applyCaps(top || []);
+  const topHealthy = top !== null && base.length >= TOP_MIN && top.length === base.length;
+  let newTop;
+  let topOk = true;
+  if (topHealthy) {
+    newTop = applyCaps(base.concat([entry]));
+    topOk = await kvPut('top', newTop);
+  } else {
+    // top replica is missing, suspiciously small, or duplicate-riddled: NEVER
+    // write over it (that clobbers the real list). The day shard is the source
+    // of truth — record there and rebuild top in the background.
+    newTop = applyCaps(scores.concat(base, [entry]));
+    kvSerial(() => rebuildTop().then((r) => {
+      if (r && r.length) {
+        const seen = new Set(r.map((e) => e.ts + '|' + e.name));
+        scores = applyCaps(r.concat(scores.filter((e) => !seen.has(e.ts + '|' + e.name))));
+        console.log('top rebuilt from shards:', r.length, 'entries');
+      }
+    }).catch(() => {}));
   }
-  const newTop = applyCaps(base.concat([entry]));
   const ek = entry.ts + '|' + entry.name;
-  const topOk = await kvPut('top', newTop);
   const dayOk = await kvPut(day, dayList.some((e) => e.ts + '|' + e.name === ek) ? dayList : dayList.concat([entry]));
-  // honest result: both writes must succeed, otherwise report failure (503) so
-  // the client persists directly instead of believing a lie
+  // honest result: both intended writes must succeed, otherwise report failure
+  // (503) so the client persists directly instead of believing a lie
   if (!topOk || !dayOk) return null;
   return newTop;
 }
@@ -318,7 +330,13 @@ const server = http.createServer(async (req, res) => {
     if (!Number.isFinite(score) || score < 0 || score > 1e9) {
       return sendJSON(res, 400, { ok: false, error: 'invalid score' });
     }
-    const entry = { name: sanitizeName(payload.name), score, maxTile, ts: Date.now() };
+    // unified timestamp: clients send the ts they will ALSO use for their
+    // direct-write fallback, so a slow hub response can never record the same
+    // play twice (both paths produce the identical ts|name key)
+    const nowTs = Date.now();
+    let ts = Number(payload.ts);
+    if (!Number.isFinite(ts) || Math.abs(ts - nowTs) > 600000) ts = nowTs;
+    const entry = { name: sanitizeName(payload.name), score, maxTile, ts };
 
     // non-hub deployments forward to the hub so exactly one writer touches the KV store
     const isHub = HUB_SELF || (req.headers.host || '').endsWith('dual-2048.onrender.com');
@@ -327,7 +345,7 @@ const server = http.createServer(async (req, res) => {
         const fr = await fetch(HUB_API, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: payload.name, score: payload.score, maxTile: payload.maxTile })
+          body: JSON.stringify({ name: payload.name, score: payload.score, maxTile: payload.maxTile, ts })
         });
         if (fr.ok) {
           const j = await fr.json();
@@ -413,7 +431,7 @@ const server = http.createServer(async (req, res) => {
       }
     });
     rebuild();
-    setInterval(rebuild, 30 * 60 * 1000);
+    setInterval(rebuild, 10 * 60 * 1000);
   }
   server.listen(PORT, HOST, () => {
     console.log(`Dual 2048 running at http://${HOST}:${PORT}` + (KV_URL ? ' (KV sync on)' : ''));

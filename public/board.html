@@ -154,13 +154,19 @@
       // full archive = hall-of-fame + today's shard + cached past day-shards + legacy key + server view
       var cache = {};
       try { cache = JSON.parse(localStorage.getItem(CACHE_KEY) || '{}'); } catch (e) { /* fresh */ }
-      var missing = [];
-      for (var i = 1; i <= WINDOW; i++) { var k = dayKey(i); if (!Array.isArray(cache[k])) missing.push(k); }
+      // recent shards keep growing all day — always refetch the two newest
+      // days live; the localStorage cache is only for older, sealed days
+      // (and as a fallback when a live fetch fails)
+      var fresh = [], missing = [];
+      for (var i = 1; i <= 2; i++) fresh.push(dayKey(i));
+      for (var i2 = 3; i2 <= WINDOW; i2++) { var k = dayKey(i2); if (!Array.isArray(cache[k])) missing.push(k); }
       var urls = [KV + '/top', KV + '/scores', KV + '/' + dayKey(0)]
+        .concat(fresh.map(function (k) { return KV + '/' + k; }))
         .concat(missing.map(function (k) { return KV + '/' + k; }));
       var res = await Promise.all(urls.map(function (u) { return grab(u, false); }).concat([grab(API, true)]));
       var top = res[0], legacy = res[1], today = res[2];
-      missing.forEach(function (k, idx) { var L = res[3 + idx]; if (L && L.length) cache[k] = L; });
+      fresh.forEach(function (k, idx) { var L = res[3 + idx]; if (L && L.length) cache[k] = L; });
+      missing.forEach(function (k, idx) { var L = res[3 + fresh.length + idx]; if (L && L.length) cache[k] = L; });
       setCache(cache);
       var list = [], shards = 0;
       function add(L) { if (L && L.length) { shards++; list = union(list, L); } }
