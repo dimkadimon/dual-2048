@@ -1,0 +1,60 @@
+# OPTIONAL fallback: deploy Render from GitHub Actions on every push.
+#
+# You only need this if you would rather not connect your GitHub account to
+# Render (Render Dashboard → Account Settings → GitHub → Connect). With the
+# GitHub App connected, Render's own webhook does this job and this file is
+# unnecessary — auto-deploy is already switched on for the service
+# (`autoDeploy: yes`, `autoDeployTrigger: commit`); it just has no webhook to
+# hear from.
+#
+# To use it:
+#   1. GitHub → this repo → Settings → Secrets and variables → Actions →
+#      New repository secret
+#         name:  RENDER_API_KEY
+#         value: a Render API key (Account Settings → API Keys)
+#      (or, to avoid a full account key, paste the service's Deploy Hook URL
+#      from Render → service → Settings → Deploy Hook as RENDER_DEPLOY_HOOK
+#      and use the commented-out curl instead)
+#   2. Copy this file to .github/workflows/deploy-render.yml (the web UI is
+#      enough: Add file → Create new file).
+#
+# It only runs the tests and asks Render to deploy the current commit; the
+# service stays live while the new build finishes, so a red build changes
+# nothing.
+
+name: Deploy to Render
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Tests
+        run: npm test
+
+      - name: Trigger the Render deploy
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+        run: |
+          curl -fsS -X POST \
+            -H "Authorization: Bearer $RENDER_API_KEY" \
+            -H 'Content-Type: application/json' \
+            -d '{}' \
+            "https://api.render.com/v1/services/srv-dal2j2gae00c73fb75a0/deploys" \
+            | tee /tmp/deploy.json
+          echo
+          echo "deploy requested: $(python3 -c 'import json;print(json.load(open("/tmp/deploy.json"))["id"])')"
+
+      # Alternative without an account API key, using the service deploy hook:
+      # - name: Trigger the Render deploy (deploy hook)
+      #   run: curl -fsS -X POST "${{ secrets.RENDER_DEPLOY_HOOK }}"

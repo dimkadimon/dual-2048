@@ -161,7 +161,10 @@ node tools/migrate.js --verify  # fail if the archive and the store disagree
   directly. Re-publish after changing `public/` with `tools/deploy-pages.sh`.
 - **Server (Node) — Render:** https://dual-2048.onrender.com — serves the same game
   static files, adds the API and runs the compactor. Auto-deploy is **On Commit**
-  (service → Settings → Auto-Deploy), so pushing to `main` redeploys it.
+  (service → **Settings** → **Auto-Deploy** → *On Commit*), but it needs Render's
+  GitHub App connected to this repo to receive pushes (Account Settings → GitHub);
+  until then, deploy with `RENDER_API_KEY=… tools/deploy-render.sh` or enable
+  `tools/render-deploy-workflow.yml`.
 - **Source:** https://github.com/dimkadimon/dual-2048
 
 ### Deploying
