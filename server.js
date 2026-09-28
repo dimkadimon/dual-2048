@@ -120,7 +120,32 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (p === '/api/health') {
-    return sendJSON(res, 200, { ok: true, store: KV_URL, cached: cache.entries.length, quality: cache.quality });
+    const out = {
+      ok: true,
+      store: KV_URL,
+      bucket: lb.bucket,
+      cached: cache.entries.length,
+      quality: cache.quality
+    };
+    if (url.searchParams.get('probe')) {
+      // what THIS host sees when it talks to the store: status codes + timing,
+      // so a deployment that cannot reach the store says so out loud
+      const t0 = Date.now();
+      const [top, live, shards, one] = await Promise.all([
+        lb.kvGet('top', 8000),
+        lb.kvList('q/', 8000),
+        lb.kvList('arc-', 8000),
+        lb.kvGet('arc-' + new Date().toISOString().slice(0, 10), 8000)
+      ]);
+      out.probe = {
+        ms: Date.now() - t0,
+        top: top.ok ? (Array.isArray(top.value) ? top.value.length : (top.missing ? 'missing' : 'empty')) : 'ERR ' + top.status,
+        live: live.ok ? live.keys.length : 'ERR ' + live.status,
+        shards: shards.ok ? shards.keys.length : 'ERR ' + shards.status,
+        today: one.ok ? (Array.isArray(one.value) ? one.value.length : (one.missing ? 'missing' : 'empty')) : 'ERR ' + one.status
+      };
+    }
+    return sendJSON(res, 200, out);
   }
 
   if (p === '/api/scores' && req.method === 'POST') {
