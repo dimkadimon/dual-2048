@@ -60,13 +60,24 @@ const MIME = {
    Players never depend on any of this: the browser talks to the store itself,
    from its own IP. The API here is a convenience mirror. */
 
-const COOLDOWN_MS = parseInt(process.env.COOLDOWN_MS || '300000', 10);
+const COOLDOWN_MS = parseInt(process.env.COOLDOWN_MS || '300000', 10);   // base backoff
+const COOLDOWN_MAX = parseInt(process.env.COOLDOWN_MAX || '3600000', 10); // ceiling
+let cooldownStep = 0;   // grows while the store keeps refusing us, resets on success
 const CACHE_FILE = process.env.BOARD_CACHE || path.join(__dirname, 'data', 'board.json');
 const SNAPSHOT_FILE = path.join(ROOT, 'archive.json');
 
 let cache = { at: 0, entries: [], quality: 'unknown' };
 let cooldownUntil = 0;
 let lastGood = 0;
+
+function backOff() {
+  cooldownStep = Math.min(cooldownStep + 1, 5);
+  const wait = Math.min(COOLDOWN_MS * Math.pow(2, cooldownStep - 1), COOLDOWN_MAX);
+  cooldownUntil = Date.now() + wait;
+  console.error('[store] refusing this host; backing off for', Math.round(wait / 1000), 's (step ' + cooldownStep + ')');
+}
+
+function storeHealthy() { cooldownStep = 0; cooldownUntil = 0; }
 
 function readSnapshot() {
   try {
@@ -98,17 +109,19 @@ async function board(maxAge) {
   try {
     const r = await lb.read({ days: 35 });
     if (r.sources.quality !== 'offline') {
+      storeHealthy();
       const fresh = r.entries.length ? r.entries : cache.entries;
       cache = { at: Date.now(), entries: fresh, quality: r.sources.quality };
       lastGood = Date.now();
       saveCacheFile();
       return cache.entries;
     }
-    // the store is refusing to talk to this host — back off instead of hammering
-    cooldownUntil = Date.now() + COOLDOWN_MS;
-    console.error('[store] unreachable from this host; pausing store access for', Math.round(COOLDOWN_MS / 1000), 's');
+    // The store is refusing to talk to this host. Back off exponentially: a
+    // host whose egress IP is out of quota must not keep burning requests
+    // (it cannot win, and it makes the quota situation worse for everyone).
+    backOff();
   } catch (e) {
-    cooldownUntil = Date.now() + COOLDOWN_MS;
+    backOff();
   }
   // Degraded: serve the union of everything we already know plus the snapshot
   // committed in the repo, so the mirror is never less complete than the file.
@@ -288,7 +301,7 @@ const server = http.createServer(async (req, res) => {
     if (Date.now() < cooldownUntil) return;
     try {
       const stats = await lb.compact({ serial: true });
-      if (stats.skipped === 'list-failed') cooldownUntil = Date.now() + COOLDOWN_MS;
+      if (stats.skipped === 'list-failed') backOff(); else if (stats.scanned || stats.kept) storeHealthy();
       if (stats.ingested || stats.deleted || stats.kept) {
         console.log(`[compact:${why}]`, JSON.stringify(stats));
       }

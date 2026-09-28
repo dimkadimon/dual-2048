@@ -87,6 +87,23 @@ node tools/migrate.js --write   # refresh public/archive.json + fold history int
 node tools/migrate.js --verify  # fail if the archive and the store disagree
 ```
 
+## Environment quirk found while doing this: kvdb throttles Render's IP
+
+`/api/health?probe=1` on the deployed service reports every store key as
+`ERR 429`: the shared store rate-limits by IP, and the Render instance's egress
+IP is out of quota (or shared with busy neighbours). That is the real reason the
+old "hub" answered with a blank board — and why the client used to distrust it.
+
+The v3 client does not depend on the server at all: each browser talks to the
+store from its own IP. The server API is a mirror that now:
+
+- retries 429/5xx with Retry-After aware backoff,
+- backs off exponentially (5 → 10 → 20 → 40 → 60 min) while the store refuses
+  that host, instead of burning a shared quota,
+- keeps serving its last good board (memory + `data/board.json`), unioned with
+  `public/archive.json`, so it is never emptier than a file, and
+- labels what it is serving (`quality: ok | partial | snapshot | cached`).
+
 ## Still to do (needs your GitHub/Render access)
 
 1. **Redeploy the Render service** (`node server.js`) so the server side runs v3.0
