@@ -77,10 +77,11 @@ const entry = (name, score, ts, tile) => ({ name, score, maxTile: tile || 64, ts
     const lb = Leaderboard.create({ bucket: url + '/bucket' });
     await lb.submit(entry('Alice', 10, Date.now()));
     await lb.compact({ quietMs: 0 });
-    kv.fail('get', 'top', 1, 429);
+    kv.fail('get', 'top', 99, 429);   // the store stays busy for this key
     const board = await lb.read({ days: 3 });
     assert.strictEqual(board.sources.quality, 'partial', 'a failed source must be flagged, not reported as zero');
-    assert(board.entries.length >= 1, 'entries from healthy sources are still returned');
+    assert(board.entries.length >= 1, 'entries from healthy sources are still returned, got ' + board.entries.length);
+    assert.strictEqual(board.entries.length, 1, 'and the healthy day archive still carries the play');
     await kv.stop();
   });
 
@@ -263,6 +264,23 @@ const entry = (name, score, ts, tile) => ({ name, score, maxTile: tile || 64, ts
       { name: 'B', score: 100, maxTile: 24, ts: t + 1000 }
     ]);
     assert.strictEqual(board.length, 4, 'only identical plays collapse');
+  });
+
+  /* ---------------------------------------------------------------- */
+  await test('a rate-limited store (429) is retried, not mistaken for an empty board', async () => {
+    const kv = createMockKV();
+    const url = await kv.start();
+    const a = Leaderboard.create({ bucket: url + '/bucket' });
+    const t = Date.now() - 3600000;
+    await a.submit(entry('Ivan', 640, t));
+    await a.compact({ quietMs: 0 });
+    kv.fail('get', 'top', 2, 429);       // the store is busy for the first two tries
+    kv.fail('list', 'q/', 1, 429);
+    const b = Leaderboard.create({ bucket: url + '/bucket' });
+    const board = await b.read({ days: 3 });
+    assert.strictEqual(board.sources.quality, 'ok', 'reads recovered after the limiter cleared, got ' + board.sources.quality);
+    assert.strictEqual(board.entries.length, 1, 'the play is on the board, got ' + board.entries.length);
+    await kv.stop();
   });
 
   /* ---------------------------------------------------------------- */

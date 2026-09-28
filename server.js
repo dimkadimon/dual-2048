@@ -45,14 +45,80 @@ const MIME = {
   '.woff2': 'font/woff2'
 };
 
-/* ---------------- cached board view ---------------- */
+/* ---------------- cached board view ----------------
+
+   The shared store rate-limits by IP (kvdb: ~1000 requests/hour). A server's
+   egress IP can be exhausted by its neighbours, which is exactly what the old
+   "hub" design ran into: every read answered 429 and the hub served an empty
+   board. So this process:
+
+     - retries a little, then backs off entirely for a cooldown
+     - keeps serving the last board it managed to read (memory + data/board.json)
+     - falls back to the snapshot committed in the repo (public/archive.json),
+       which is always available and always complete
+
+   Players never depend on any of this: the browser talks to the store itself,
+   from its own IP. The API here is a convenience mirror. */
+
+const COOLDOWN_MS = parseInt(process.env.COOLDOWN_MS || '300000', 10);
+const CACHE_FILE = process.env.BOARD_CACHE || path.join(__dirname, 'data', 'board.json');
+const SNAPSHOT_FILE = path.join(ROOT, 'archive.json');
 
 let cache = { at: 0, entries: [], quality: 'unknown' };
+let cooldownUntil = 0;
+let lastGood = 0;
+
+function readSnapshot() {
+  try {
+    const list = JSON.parse(fs.readFileSync(SNAPSHOT_FILE, 'utf8'));
+    return Array.isArray(list) ? list.filter((e) => e && e.name != null && Number.isFinite(Number(e.ts))) : [];
+  } catch (e) { return []; }
+}
+
+function loadCacheFile() {
+  try {
+    const j = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf8'));
+    if (j && Array.isArray(j.entries) && j.entries.length) {
+      cache = { at: 0, entries: j.entries, quality: 'cached' };
+      lastGood = Number(j.at) || 0;
+    }
+  } catch (e) { /* first run */ }
+}
+
+function saveCacheFile() {
+  try {
+    fs.mkdirSync(path.dirname(CACHE_FILE), { recursive: true });
+    fs.writeFileSync(CACHE_FILE, JSON.stringify({ at: Date.now(), entries: cache.entries.slice(0, 5000) }));
+  } catch (e) { /* disk full / read-only: the in-memory cache still works */ }
+}
 
 async function board(maxAge) {
   if (cache.entries.length && Date.now() - cache.at < (maxAge == null ? READ_TTL : maxAge)) return cache.entries;
-  const r = await lb.read({ days: 35 });
-  cache = { at: Date.now(), entries: r.entries, quality: r.sources.quality };
+  if (Date.now() < cooldownUntil) return cache.entries;          // store is busy: serve what we have
+  try {
+    const r = await lb.read({ days: 35 });
+    if (r.sources.quality !== 'offline') {
+      const fresh = r.entries.length ? r.entries : cache.entries;
+      cache = { at: Date.now(), entries: fresh, quality: r.sources.quality };
+      lastGood = Date.now();
+      saveCacheFile();
+      return cache.entries;
+    }
+    // the store is refusing to talk to this host — back off instead of hammering
+    cooldownUntil = Date.now() + COOLDOWN_MS;
+    console.error('[store] unreachable from this host; pausing store access for', Math.round(COOLDOWN_MS / 1000), 's');
+  } catch (e) {
+    cooldownUntil = Date.now() + COOLDOWN_MS;
+  }
+  // Degraded: serve the union of everything we already know plus the snapshot
+  // committed in the repo, so the mirror is never less complete than the file.
+  const snap = readSnapshot();
+  if (snap.length) {
+    const merged = lb.collapse(lb.merge(cache.entries, snap));
+    if (merged.length > cache.entries.length) {
+      cache = { at: Date.now(), entries: merged, quality: 'snapshot' };
+    }
+  }
   return cache.entries;
 }
 
@@ -125,7 +191,9 @@ const server = http.createServer(async (req, res) => {
       store: KV_URL,
       bucket: lb.bucket,
       cached: cache.entries.length,
-      quality: cache.quality
+      quality: cache.quality,
+      lastGoodRead: lastGood ? new Date(lastGood).toISOString() : null,
+      storeCooldownSec: Math.max(0, Math.round((cooldownUntil - Date.now()) / 1000))
     };
     if (url.searchParams.get('probe')) {
       // what THIS host sees when it talks to the store: status codes + timing,
@@ -211,13 +279,16 @@ const server = http.createServer(async (req, res) => {
 /* ---------------- compactor ---------------- */
 
 (async () => {
+  loadCacheFile();
   server.listen(PORT, HOST, () => {
     console.log(`Dual 2048 running at http://${HOST}:${PORT}  (store: ${KV_URL})`);
   });
 
   const pass = async (why) => {
+    if (Date.now() < cooldownUntil) return;
     try {
       const stats = await lb.compact({ serial: true });
+      if (stats.skipped === 'list-failed') cooldownUntil = Date.now() + COOLDOWN_MS;
       if (stats.ingested || stats.deleted || stats.kept) {
         console.log(`[compact:${why}]`, JSON.stringify(stats));
       }

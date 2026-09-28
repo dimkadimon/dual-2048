@@ -93,6 +93,40 @@ async function test(name, fn) {
     assert(j.ok && j.store, 'health ok');
   });
 
+  /* ----------------------------------------------------------------
+     The store can rate-limit a host entirely (that is how the old "hub"
+     ended up serving a blank board). The API must degrade to the number
+     it already knows, and to the snapshot in the repo — never to empty. */
+  await test('a store that refuses everything still yields a full board (snapshot fallback)', async () => {
+    const blocked = createMockKV();
+    const blockedUrl = await blocked.start();
+    blocked.fail('get', '', 9999, 429);
+    blocked.fail('list', '', 9999, 429);
+
+    const srv2 = spawn(process.execPath, ['server.js'], {
+      cwd: __dirname,
+      env: {
+        ...process.env, PORT: String(PORT + 1), KV_URL: blockedUrl + '/bucket',
+        COMPACT_MS: '1000000', READ_TTL: '0',
+        BOARD_CACHE: require('os').tmpdir() + '/dual2048-test-board-' + Date.now() + '.json'   // start with no local cache
+      },
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+    srv2.stdout.on('data', () => {}); srv2.stderr.on('data', () => {});
+    await sleep(900);
+    const j = await (await fetch('http://127.0.0.1:' + (PORT + 1) + '/api/scores')).json();
+    assert(j.ok, 'API answers');
+    assert(j.scores.length > 0, 'the board is not empty, got ' + j.scores.length);
+    assert(j.total > 1000, 'the repo snapshot carries the history, got ' + j.total);
+    assert.strictEqual(j.quality, 'snapshot', 'and it says where the numbers came from, got ' + j.quality);
+    const dup = j.scores.length - new Set(j.scores.map((e) => e.ts + '|' + e.name)).size;
+    assert.strictEqual(dup, 0, 'and it is de-duplicated');
+    const h = await (await fetch('http://127.0.0.1:' + (PORT + 1) + '/api/health?probe=1')).json();
+    assert(h.storeCooldownSec > 0, 'the host backs off instead of hammering the limiter');
+    srv2.kill();
+    await blocked.stop();
+  });
+
   server.kill();
   await kv.stop();
   console.log('\n  ' + passed + ' passed, ' + failed + ' failed');

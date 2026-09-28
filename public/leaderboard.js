@@ -70,22 +70,45 @@
 
     /* ---------- raw store access (every call is validated) ---------- */
 
-    async function kvGet(key, timeoutMs) {
-      var t = withTimeout(timeoutMs || 8000);
-      if (t.start) t.start();
-      try {
-        var r = await doFetch(BUCKET + '/' + key + '', { cache: 'no-store', signal: t.signal });
-        if (t.done) t.done();
-        if (r.status === 404) return { ok: true, missing: true, value: null };
-        if (!r.ok) return { ok: false, status: r.status };
-        var txt = (await r.text()).trim();
-        if (!txt) return { ok: true, missing: false, value: null };
-        try { return { ok: true, missing: false, value: JSON.parse(txt) }; }
-        catch (e) { return { ok: false, status: 'bad-json' }; }
-      } catch (e) {
-        if (t.done) t.done();
-        return { ok: false, status: 'network' };
+    function tooBusy(status) { return status === 429 || status === 503 || status === 500 || status === 502 || status === 504 || status === 'network'; }
+
+    function retryDelay(res, attempt) {
+      var after = res && res.headers && res.headers.get && Number(res.headers.get('retry-after'));
+      if (Number.isFinite(after) && after > 0) return Math.min(after * 1000, 5000);
+      return 400 * (attempt + 2);
+    }
+
+    /* Reads retry on the store's rate limiter. A busy store answers 429 and
+       nothing else for a while (a shared egress IP can burn the hourly quota),
+       so a single failed read must not look like "the board is empty" — that
+       mistake is what made earlier versions serve blank leaderboards. */
+    async function kvGet(key, timeoutMs, tries) {
+      var attempts = tries || 3;
+      var last = null;
+      for (var i = 0; i < attempts; i++) {
+        var t = withTimeout(timeoutMs || 8000);
+        if (t.start) t.start();
+        try {
+          var r = await doFetch(BUCKET + '/' + key + '', { cache: 'no-store', signal: t.signal });
+          if (t.done) t.done();
+          if (r.status === 404) return { ok: true, missing: true, value: null };
+          if (!r.ok) {
+            last = { ok: false, status: r.status };
+            if (!tooBusy(r.status)) return last;
+            await sleep(retryDelay(r, i));
+            continue;
+          }
+          var txt = (await r.text()).trim();
+          if (!txt) return { ok: true, missing: false, value: null };
+          try { return { ok: true, missing: false, value: JSON.parse(txt) }; }
+          catch (e) { return { ok: false, status: 'bad-json' }; }
+        } catch (e) {
+          if (t.done) t.done();
+          last = { ok: false, status: 'network' };
+          await sleep(retryDelay(null, i));
+        }
       }
+      return last;
     }
 
     async function kvPut(key, value, timeoutMs) {
@@ -99,6 +122,7 @@
           signal: t.signal
         });
         if (t.done) t.done();
+        if (!r.ok && tooBusy(r.status)) await sleep(retryDelay(r, 0));
         return { ok: !!r.ok, status: r.status };
       } catch (e) {
         if (t.done) t.done();
@@ -106,19 +130,30 @@
       }
     }
 
-    async function kvList(prefix, timeoutMs) {
-      var t = withTimeout(timeoutMs || 8000);
-      if (t.start) t.start();
-      try {
-        var r = await doFetch(BUCKET + '/?prefix=' + encodeURIComponent(prefix), { cache: 'no-store', signal: t.signal });
-        if (t.done) t.done();
-        if (!r.ok) return { ok: false, status: r.status };
-        var txt = (await r.text()).trim();
-        return { ok: true, keys: txt ? txt.split('\n').map(function (s) { return s.trim(); }).filter(Boolean) : [] };
-      } catch (e) {
-        if (t.done) t.done();
-        return { ok: false, status: 'network' };
+    async function kvList(prefix, timeoutMs, tries) {
+      var attempts = tries || 3;
+      var last = null;
+      for (var i = 0; i < attempts; i++) {
+        var t = withTimeout(timeoutMs || 8000);
+        if (t.start) t.start();
+        try {
+          var r = await doFetch(BUCKET + '/?prefix=' + encodeURIComponent(prefix), { cache: 'no-store', signal: t.signal });
+          if (t.done) t.done();
+          if (!r.ok) {
+            last = { ok: false, status: r.status };
+            if (!tooBusy(r.status)) return last;
+            await sleep(retryDelay(r, i));
+            continue;
+          }
+          var txt = (await r.text()).trim();
+          return { ok: true, keys: txt ? txt.split('\n').map(function (s) { return s.trim(); }).filter(Boolean) : [] };
+        } catch (e) {
+          if (t.done) t.done();
+          last = { ok: false, status: 'network' };
+          await sleep(retryDelay(null, i));
+        }
       }
+      return last;
     }
 
     async function kvDel(key, timeoutMs) {
