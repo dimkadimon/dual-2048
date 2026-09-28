@@ -708,46 +708,17 @@
 
   /* ================= LEADERBOARDS ================= */
 
-  /* Global scores run in two modes:
-     1. same-origin Node API (/api/scores) when served by server.js
-     2. free kvdb.io bucket fallback — lets the game run as a pure static
-        deploy (surge.sh, Netlify, GitHub Pages, file://…) with a working
-        shared leaderboard. */
-  const KV_BASE = 'https://kvdb.io/WFqmZseFLUPww2FWnuzBWs';
-  const HOF_CAP = 2000; // hall-of-fame key ("top") size — permanent, rewritten every submit
-  // full archive lives in day shards: arc-YYYY-MM-DD (kvdb TTL rotates them after ~30 days)
-
-  async function kvGet(key) {
-    const res = await fetch(KV_BASE + '/' + key, { cache: 'no-store' });
-    if (res.status === 404) return [];
-    if (!res.ok) throw new Error('kv get failed');
-    const txt = (await res.text()).trim();
-    if (!txt) return [];
-    const arr = JSON.parse(txt);
-    return Array.isArray(arr) ? arr : [];
-  }
-
-  /* null = read FAILED (never overwrite such a key); array = known state */
-  async function kvGetSafe(key) {
-    try {
-      const res = await fetch(KV_BASE + '/' + key, { cache: 'no-store' });
-      if (res.status === 404) return [];
-      if (!res.ok) return null;
-      const txt = (await res.text()).trim();
-      if (!txt) return [];
-      const arr = JSON.parse(txt);
-      return Array.isArray(arr) ? arr : null;
-    } catch (e) { return null; }
-  }
-
-  async function kvPut(key, list) {
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const res = await fetch(KV_BASE + '/' + key, { method: 'PUT', body: JSON.stringify(list) });
-      if (res.ok) return;
-      await new Promise((r) => setTimeout(r, 400));
-    }
-    throw new Error('kv put failed');
-  }
+  /* Global scores use the shared write-once store (see leaderboard.js).
+     Every finished game becomes ONE immutable record, so two players playing
+     at the same time can never erase each other and a retry can never record
+     the same play twice. Reads union the live records with the compacted
+     archives, so nothing that was ever stored can disappear. */
+  const LB = Leaderboard.create({
+    bucket: Leaderboard.DEFAULT_BUCKET,
+    storage: { get: (k) => lsGet(k), set: (k, v) => lsSet(k, v) }
+  });
+  const LS_PENDING = 'dual2048-pending-v3';
+  const HUB_API = 'https://dual-2048.onrender.com/api/scores'; // optional mirror/API
 
   function populateList(el, entries, emptyMsg) {
     if (!el) return;
@@ -772,9 +743,20 @@
   }
 
   let globalCache = [];
+  let globalTotal = 0;
+
   async function fetchGlobal() {
-    // 1) same-origin Node API (only trust it if it actually has data —
-    //    a server whose KV access is throttled would otherwise answer "empty")
+    // 1) the shared store: live records + hall of fame + recent day archives
+    try {
+      const r = await LB.read({ days: 3 });
+      if (r.entries.length) {
+        globalCache = r.entries;
+        globalTotal = r.entries.length;
+        renderGlobal();
+        return;
+      }
+    } catch (e) { /* fall through to the mirrors */ }
+    // 2) this deployment's own API (any server running server.js)
     try {
       const ctrl = new AbortController();
       const to = setTimeout(() => ctrl.abort(), 4000);
@@ -784,29 +766,23 @@
         const data = await res.json();
         if ((data.scores || []).length) {
           globalCache = data.scores;
+          globalTotal = data.total || data.scores.length;
           renderGlobal();
           return;
         }
       }
     } catch (e) { /* fall through */ }
-    // 2) kvdb direct: hall-of-fame ∪ last two day shards (browser IPs aren't
-    //    throttled; the shards surface plays newer than the last top rebuild)
+    // 3) the permanent archive committed in the repo (survives any store outage)
     try {
-      const d0 = 'arc-' + new Date().toISOString().slice(0, 10);
-      const d1 = 'arc-' + new Date(Date.now() - 86400000).toISOString().slice(0, 10);
-      const parts = await Promise.all([kvGetSafe('top'), kvGetSafe(d0), kvGetSafe(d1)]);
-      const t = parts[0];
-      if (t !== null) {
-        const merged = dedupeScores(t.concat(parts[1] || [], parts[2] || []))
-          .sort((a, b) => b.score - a.score || a.ts - b.ts);
-        if (merged.length) {
-          globalCache = merged;
-          renderGlobal();
-          return;
-        }
+      const list = await fetchArchive();
+      if (list.length) {
+        globalCache = LB.merge(list, globalCache);
+        globalTotal = globalCache.length;
+        renderGlobal();
+        return;
       }
     } catch (e) { /* fall through */ }
-    // 3) shared hub view
+    // 4) the shared hub API
     try {
       const ctrl = new AbortController();
       const to = setTimeout(() => ctrl.abort(), 6000);
@@ -816,147 +792,79 @@
         const data = await res.json();
         if ((data.scores || []).length) {
           globalCache = data.scores;
+          globalTotal = data.total || data.scores.length;
           renderGlobal();
           return;
         }
       }
     } catch (e) { /* fall through */ }
-    // 4) kvdb legacy key
-    try {
-      const list = await kvGet('scores');
-      globalCache = list;
-      renderGlobal();
-      return;
-    } catch (e) {
-      const msg = 'Leaderboard offline — try again later!';
-      populateList($('globalList'), [], msg);
-      populateList($('overGlobalList'), [], msg);
-    }
+    const msg = 'Leaderboard offline — try again later!';
+    populateList($('globalList'), [], msg);
+    populateList($('overGlobalList'), [], msg);
   }
 
-  function dedupeScores(list) {
-    const seen = new Set();
-    const out = [];
-    for (const e of list || []) {
-      const k = e.ts + '|' + e.name;
-      if (seen.has(k)) continue;
-      seen.add(k);
-      out.push(e);
+  async function fetchArchive() {
+    // same-origin first (server.js serves public/), then the GitHub copy
+    for (const url of ['archive.json', 'https://raw.githubusercontent.com/dimkadimon/dual-2048/main/public/archive.json']) {
+      try {
+        const res = await fetch(url, { cache: 'no-store' });
+        if (!res.ok) continue;
+        const list = await res.json();
+        if (Array.isArray(list) && list.length) return list;
+      } catch (e) { /* try the next mirror */ }
     }
-    return out;
-  }
-
-  /* Display safety net: collapse same name+score clusters <10 min apart
-     (impossible as separate games — they are interrupted-submit doubles). */
-  function nearDedupe(list) {
-    const byTs = (list || []).slice().sort((a, b) => a.ts - b.ts);
-    const lastKept = new Map();
-    const drop = new Set();
-    for (const e of byTs) {
-      const gk = e.name + '|' + e.score;
-      const t = lastKept.get(gk);
-      if (t !== undefined && e.ts - t < 600000) { drop.add(e.ts + '|' + e.name); continue; }
-      lastKept.set(gk, e.ts);
-    }
-    return drop.size ? (list || []).filter((e) => !drop.has(e.ts + '|' + e.name)) : (list || []);
+    return [];
   }
 
   function renderGlobal() {
     const msg = 'No global scores yet — claim #1!';
-    const top = nearDedupe(globalCache).slice(0, 100); // in-game shows the top 100; board.html shows the full archive
+    // include plays that are stored locally but not delivered yet, so a score
+    // never looks lost to the player who just set it
+    const top = LB.merge(globalCache, pendingAll()).slice(0, 100); // in-game shows the top 100; board.html shows the full archive
     populateList($('globalList'), top, msg);
     populateList($('overGlobalList'), top, msg);
   }
 
+  /* Scores that could not be stored yet are kept here and delivered later —
+     the record id is derived from the play's timestamp, so re-sending is
+     idempotent (it re-writes the same record, it can never duplicate one). */
+  function pendingAll() { return lsJSON(LS_PENDING, []); }
+  function pendingAdd(entry) {
+    const list = pendingAll().filter((e) => !(e.ts === entry.ts && e.name === entry.name));
+    list.push(entry);
+    lsSet(LS_PENDING, JSON.stringify(list.slice(-50)));
+  }
+  function pendingDrop(entry) {
+    lsSet(LS_PENDING, JSON.stringify(pendingAll().filter((e) => !(e.ts === entry.ts && e.name === entry.name))));
+  }
+  let flushing = null;
+  function flushPending() {
+    if (flushing) return flushing;
+    flushing = (async () => {
+      const list = pendingAll();
+      for (const e of list) {
+        const out = await LB.submit(e, { id: e.ts + '-' + (e.name || '').slice(0, 4).replace(/\W/g, '') + 'r' });
+        if (out.ok) pendingDrop(e); else break;   // still offline — keep them for later
+        await new Promise((r) => setTimeout(r, 120));
+      }
+      flushing = null;
+    })().catch(() => { flushing = null; });
+    return flushing;
+  }
+
   async function submitGlobal(name, score, maxTile) {
     if (!score) return null;
-    // ONE timestamp for every path below: if the hub is slow and the fallback
-    // also writes, both produce the identical ts|name entry — idempotent, the
-    // same play can never be recorded twice
-    const ts = Date.now();
-    let hubDown = false; // same-origin hub answered 503 → skip the cross-origin retry of the same server
-    // 1) same-origin Node API
-    try {
-      const ctrl = new AbortController();
-      const to = setTimeout(() => ctrl.abort(), 5000);
-      const res = await fetch('/api/scores', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, score, maxTile, ts }),
-        signal: ctrl.signal
-      });
-      clearTimeout(to);
-      if (res.ok) return await res.json();
-      if (res.status === 503) hubDown = true;
-    } catch (e) { /* fall through */ }
-    // 2) shared hub API (cross-origin) — single serialized writer, no clobbering
-    if (!hubDown) try {
-      const ctrl = new AbortController();
-      const to = setTimeout(() => ctrl.abort(), 9000);
-      const res = await fetch(HUB_API, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, score, maxTile, ts }),
-        signal: ctrl.signal
-      });
-      clearTimeout(to);
-      if (res.ok) {
-        const j = await res.json();
-        if (j && j.ok) return j; // hub said "stored" — done
-      }
-    } catch (e) { /* fall through to kv mode */ }
-    // 3) kvdb fallback (hub asleep / hub KV throttled): verified appends with retry
-    try {
-      const entry = { name: String(name).replace(/[<>]/g, '').trim().slice(0, 16) || 'ANON', score, maxTile, ts };
-      const dayOk = await kvAppendDay(entry);
-      await kvTopInsert(entry);
-      if (!dayOk) return null;
-      const ref = (await kvGetSafe('top')) || [];
-      const rank = ref.findIndex((e) => e.ts === entry.ts && e.name === entry.name) + 1 ||
-                   ref.filter((e) => e.score > entry.score).length + 1;
-      const isPB = !ref.some((e) => e.ts !== entry.ts && String(e.name).toLowerCase() === entry.name.toLowerCase() && e.score > entry.score);
-      return { ok: true, rank: rank || ref.length, total: ref.length, isPB };
-    } catch (e) {
-      return null;
-    }
-  }
-
-  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const sameEntry = (e, x) => e.ts === x.ts && e.name === x.name;
-
-  /* Append to today's shard and VERIFY it stuck; retry if a concurrent
-     writer clobbered us or a read failed. */
-  async function kvAppendDay(entry) {
-    const day = 'arc-' + new Date(entry.ts).toISOString().slice(0, 10);
-    for (let i = 0; i < 3; i++) {
-      const list = await kvGetSafe(day);
-      if (list === null) { await sleep(300); continue; }
-      if (!list.some((e) => sameEntry(e, entry))) {
-        try { await kvPut(day, dedupeScores(list.concat([entry]))); } catch (e) { await sleep(300); continue; }
-      }
-      const chk = await kvGetSafe(day);
-      if (chk && chk.some((e) => sameEntry(e, entry))) return true;
-      await sleep(250);
-    }
-    return false;
-  }
-
-  /* Best-effort hall-of-fame insert (entry may legitimately fall outside the cap).
-     'top' is a derived cache — if the replica we read is duplicate-riddled
-     (stale/corrupt), skip writing and let the hub's shard rebuild heal it. */
-  async function kvTopInsert(entry) {
-    for (let i = 0; i < 2; i++) {
-      const list = await kvGetSafe('top');
-      if (list === null) { await sleep(300); continue; }
-      if (dedupeScores(list).length !== list.length) return true;
-      if (!list.some((e) => sameEntry(e, entry))) {
-        const nl = dedupeScores(list.concat([entry])).sort((a, b) => b.score - a.score || a.ts - b.ts).slice(0, HOF_CAP);
-        if (!nl.some((e) => sameEntry(e, entry))) return true; // capped out — nothing to write
-        try { await kvPut('top', nl); } catch (e) { continue; }
-      }
-      return true;
-    }
-    return false;
+    const entry = { name, score, maxTile, ts: Date.now() };
+    const out = await LB.submit(entry);
+    if (!out.ok) pendingAdd(entry);            // never silently drop a score
+    // rank against what we last saw (+ this play) so the results screen is instant
+    const merged = LB.merge(globalCache, [entry]);
+    globalCache = merged;
+    globalTotal = merged.length;
+    const rank = merged.findIndex((e) => e.ts === entry.ts && e.name === entry.name) + 1;
+    const isPB = !merged.some((e) => !(e.ts === entry.ts && e.name === entry.name) &&
+      String(e.name).toLowerCase() === String(entry.name).toLowerCase() && e.score > entry.score);
+    return { ok: out.ok, rank: rank || merged.length, total: merged.length, isPB, entry };
   }
 
   function escapeHtml(s) {
@@ -1344,6 +1252,7 @@
   setScreen('start');
   renderLocal();
   fetchGlobal();
+  flushPending().then(() => fetchGlobal());
 
   // idle demo board behind the start overlay
   Logic.newGame(st, () => 0.42);

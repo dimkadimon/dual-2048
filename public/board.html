@@ -98,15 +98,14 @@
 
     <footer>
       <a href="index.html">← back to the game</a> · refreshes every 30 s and on tab focus ·
-      full archive: every score kept in 30-day shards + permanent hall of fame ·
+      every score ever stored, de-duplicated by play · write-once records + day archives + the repo snapshot ·
       raw data: <a href="https://kvdb.io/WFqmZseFLUPww2FWnuzBWs/top" target="_blank" rel="noopener">kvdb bucket</a>
     </footer>
   </div>
 
+  <script src="leaderboard.js?v=3.0.0"></script>
   <script>
     'use strict';
-    var KV = 'https://kvdb.io/WFqmZseFLUPww2FWnuzBWs'; // bucket base
-    var API = 'https://dual-2048.onrender.com/api/scores'; // secondary source (CORS-open)
     var $ = function (id) { return document.getElementById(id); };
     var esc = function (s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); };
     var fmtWhen = function (ts) {
@@ -117,88 +116,66 @@
       } catch (e) { return ''; }
     };
 
-    async function grab(url, isApi) {
-      try {
-        var r = await fetch(url, { cache: 'no-store' });
-        if (!r.ok) return null;
-        var j = JSON.parse(await r.text());
-        var list = isApi ? (j && j.scores) : j;
-        return Array.isArray(list) ? list : null;
-      } catch (e) { return null; }
-    }
-
-    function union(a, b) {
-      var seen = {}, out = [];
-      (a || []).concat(b || []).forEach(function (e) {
-        if (!e || e.ts == null) return;
-        var k = e.ts + '|' + e.name;
-        if (seen[k]) return;
-        seen[k] = 1; out.push(e);
-      });
-      return out;
-    }
-
-    /* Collapse interrupted-submit doubles: same name+score <10 min apart cannot
-       be separate finished games. Keeps the earliest, preserves input order. */
-    function nearDedupe(list) {
-      var byTs = (list || []).slice().sort(function (a, b) { return a.ts - b.ts; });
-      var lastKept = {}, drop = {}, dropped = false;
-      byTs.forEach(function (e) {
-        var gk = e.name + '|' + e.score;
-        if (lastKept[gk] !== undefined && e.ts - lastKept[gk] < 600000) { drop[e.ts + '|' + e.name] = 1; dropped = true; return; }
-        lastKept[gk] = e.ts;
-      });
-      return dropped ? (list || []).filter(function (e) { return !drop[e.ts + '|' + e.name]; }) : (list || []);
-    }
-
-    var DAYMS = 86400000, CACHE_KEY = 'dual2048-arc-cache-v2', WINDOW = 34;
-    try { localStorage.removeItem('dual2048-arc-cache'); } catch (e) { /* old cache from before the dedupe era — drop it */ }
-    function dayKey(off) { return 'arc-' + new Date(Date.now() - off * DAYMS).toISOString().slice(0, 10); }
-    function setCache(cache) {
-      try { localStorage.setItem(CACHE_KEY, JSON.stringify(cache)); }
-      catch (e) {
-        var ks = Object.keys(cache).sort();
-        while (ks.length > 7) delete cache[ks.shift()];
-        try { localStorage.setItem(CACHE_KEY, JSON.stringify(cache)); } catch (e2) { /* give up */ }
+    /* The full board is a union of independent sources, so any single one of
+       them can be stale, empty or gone and the history is still complete:
+         - every write-once record (q/) that has not been compacted yet
+         - the hall-of-fame cache and the day archives written by the compactor
+         - archive.json in this repo — a permanent snapshot that outlives the
+           store itself (the store expires keys after ~30 days)
+       Reads are de-duplicated by play identity (ts|name), which is what makes
+       "the same score twice" impossible unless it really was played twice. */
+    var LB = Leaderboard.create({
+      bucket: Leaderboard.DEFAULT_BUCKET,
+      storage: {
+        get: function (k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
+        set: function (k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
       }
+    });
+
+    var ARCHIVE_URLS = [
+      'archive.json',
+      'https://raw.githubusercontent.com/dimkadimon/dual-2048/main/public/archive.json'
+    ];
+    var CACHE_KEY = 'dual2048-v3-daycache';
+    var cache = {};
+    try { cache = JSON.parse(localStorage.getItem(CACHE_KEY) || '{}'); } catch (e) { cache = {}; }
+    function cacheGet(k) { return Array.isArray(cache[k]) ? cache[k] : null; }
+    function cacheSet(k, list) {
+      cache[k] = list;
+      try { localStorage.setItem(CACHE_KEY, JSON.stringify(cache)); }
+      catch (e) { var ks = Object.keys(cache).sort(); while (ks.length > 10) delete cache[ks.shift()]; try { localStorage.setItem(CACHE_KEY, JSON.stringify(cache)); } catch (e2) {} }
     }
 
+    function grabArchive() {
+      var i = 0;
+      function next() {
+        if (i >= ARCHIVE_URLS.length) return Promise.resolve([]);
+        var url = ARCHIVE_URLS[i++];
+        return fetch(url, { cache: 'no-store' }).then(function (r) {
+          if (!r.ok) return next();
+          return r.json().then(function (j) { return Array.isArray(j) && j.length ? j : next(); });
+        }).catch(next);
+      }
+      return next();
+    }
+
+    var lastQuality = '';
     async function load() {
       $('status').textContent = 'loading…';
-      // full archive = hall-of-fame + today's shard + cached past day-shards + legacy key + server view
-      var cache = {};
-      try { cache = JSON.parse(localStorage.getItem(CACHE_KEY) || '{}'); } catch (e) { /* fresh */ }
-      // recent shards keep growing all day — always refetch the two newest
-      // days live; the localStorage cache is only for older, sealed days
-      // (and as a fallback when a live fetch fails)
-      var fresh = [], missing = [];
-      for (var i = 1; i <= 2; i++) fresh.push(dayKey(i));
-      for (var i2 = 3; i2 <= WINDOW; i2++) { var k = dayKey(i2); if (!Array.isArray(cache[k])) missing.push(k); }
-      var urls = [KV + '/top', KV + '/scores', KV + '/' + dayKey(0)]
-        .concat(fresh.map(function (k) { return KV + '/' + k; }))
-        .concat(missing.map(function (k) { return KV + '/' + k; }));
-      var res = await Promise.all(urls.map(function (u) { return grab(u, false); }).concat([grab(API, true)]));
-      var top = res[0], legacy = res[1], today = res[2];
-      fresh.forEach(function (k, idx) { var L = res[3 + idx]; if (L && L.length) cache[k] = L; });
-      missing.forEach(function (k, idx) { var L = res[3 + fresh.length + idx]; if (L && L.length) cache[k] = L; });
-      setCache(cache);
-      var list = [], shards = 0;
-      function add(L) { if (L && L.length) { shards++; list = union(list, L); } }
-      add(top); add(legacy); add(today);
-      for (var j = 1; j <= WINDOW; j++) add(cache[dayKey(j)]);
-      add(res[res.length - 1]); // server API view
+      var archive = await grabArchive();   // permanent floor, fetched in parallel-friendly order
+      var r = await LB.read({ days: 35, cache: { get: cacheGet, set: cacheSet }, extra: [archive] });
+      var list = r.entries;
+      lastQuality = r.sources.quality;
       if (!list.length) {
         $('status').innerHTML = '<span class="err">board offline — try again</span>';
         return;
       }
-      list.sort(function (a, b) { return b.score - a.score || a.ts - b.ts; });
-      list = nearDedupe(list); // collapse interrupted-submit doubles (same name+score <10 min apart)
       render(list);
-      $('status').textContent = list.length + ' scores · ' + shards + ' shards · ' + new Date().toLocaleTimeString();
+      $('status').textContent = list.length + ' scores · ' +
+        (r.sources.shards) + ' archives · ' + lastQuality + ' · ' + new Date().toLocaleTimeString();
     }
 
     function render(list) {
-      // headline stats
       var players = {};
       list.forEach(function (e) {
         var k = String(e.name).toLowerCase();
@@ -217,7 +194,6 @@
         '<div class="stat"><label>TOP SCORE</label><b>' + (list[0] ? list[0].score.toLocaleString() : '—') + '</b></div>' +
         '<div class="stat"><label>TOP TILE</label><b>' + (topTile || '—') + '</b></div>';
 
-      // every score
       $('rows').innerHTML = list.map(function (e, i) {
         return '<tr' + (i === 0 ? ' class="top"' : '') + '><td class="r">' + (i + 1) + '</td>' +
           '<td class="n">' + esc(e.name) + '</td>' +
@@ -226,7 +202,6 @@
           '<td class="w">' + fmtWhen(e.ts) + '</td></tr>';
       }).join('') || '<tr><td colspan="5" style="text-align:center;color:var(--dim)">No global scores yet — claim #1!</td></tr>';
 
-      // per-player
       $('prows').innerHTML = arr.map(function (p, i) {
         return '<tr' + (i === 0 ? ' class="top"' : '') + '><td class="r">' + (i + 1) + '</td>' +
           '<td class="n">' + esc(p.name) + '</td>' +

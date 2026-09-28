@@ -1,0 +1,53 @@
+# READY-TO-ENABLE GitHub Action: keeps public/archive.json (the permanent,
+# in-repo snapshot of every score) up to date, hourly.
+#
+# Why it is not enabled yet: adding a file under .github/workflows/ needs the
+# `workflow` OAuth scope, which the token used to build this change did not
+# have. To turn it on (30 seconds, no local checkout needed):
+#
+#   GitHub → this repo → Add file → Create new file
+#   name:  .github/workflows/archive.yml
+#   paste: everything below this comment block
+#   commit.
+#
+# It needs no secrets (the store is public and the job commits with the
+# workflow's own token) and it only ever adds rows.
+
+name: Archive leaderboard
+
+on:
+  schedule:
+    - cron: '17 * * * *'      # hourly
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: archive
+  cancel-in-progress: false
+
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Merge the store into the archive
+        run: node tools/migrate.js --write
+
+      - name: Commit the snapshot
+        run: |
+          git config user.name  'leaderboard-archive'
+          git config user.email 'actions@users.noreply.github.com'
+          if git diff --quiet -- public/archive.json; then
+            echo "archive already up to date"
+            exit 0
+          fi
+          git add public/archive.json
+          git commit -m "archive: leaderboard snapshot $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push
