@@ -266,6 +266,21 @@ const entry = (name, score, ts, tile) => ({ name, score, maxTile: tile || 64, ts
   });
 
   /* ---------------------------------------------------------------- */
+  await test('a v2-style KV_URL ("<bucket>/scores") is accepted as the bucket', async () => {
+    const kv = createMockKV();
+    const url = await kv.start();
+    const lb = Leaderboard.create({ bucket: url + '/bucket/scores' });   // old env var format
+    assert.strictEqual(lb.bucket, url + '/bucket', 'the trailing /scores must be stripped');
+    const t = Date.now() - 3600000;
+    await lb.submit(entry('Hana', 250, t));
+    await lb.compact({ quietMs: 0 });
+    const board = await lb.read({ days: 3 });
+    assert.strictEqual(board.entries.length, 1, 'the play is readable through the same base');
+    assert.strictEqual(board.sources.quality, 'ok', 'all sources healthy, got ' + board.sources.quality);
+    await kv.stop();
+  });
+
+  /* ---------------------------------------------------------------- */
   console.log(results.join('\n'));
   console.log('\n  ' + passed + ' passed, ' + failed + ' failed');
   process.exit(failed ? 1 : 0);

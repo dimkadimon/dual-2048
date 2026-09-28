@@ -50,7 +50,10 @@
 
   function create(opts) {
     opts = opts || {};
-    var BUCKET = (opts.bucket || DEFAULT_BUCKET).replace(/\/+$/, '');
+    // The bucket base: every key lives directly under it. Deployments created
+    // for v2.x still point KV_URL at the old key (".../scores") — accept that
+    // form too and treat it as the bucket, so an existing env var keeps working.
+    var BUCKET = String(opts.bucket || DEFAULT_BUCKET).trim().replace(/\/+$/, '').replace(/\/scores$/, '');
     var doFetch = opts.fetch || (typeof fetch === 'function' ? fetch : null);
     var store = opts.storage || null;      // localStorage-like (browser only)
     var now = opts.now || Date.now;
