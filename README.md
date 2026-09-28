@@ -155,7 +155,11 @@ node tools/migrate.js --verify  # fail if the archive and the store disagree
 
 ## Live deployments
 
-- **Server (Node) — Render:** https://dual-2048.onrender.com
+- **Static (GitHub Pages):** https://dimkadimon.github.io/dual-2048/ — `public/` served
+  from the `gh-pages` branch; it needs no server because the client talks to the store
+  directly. Re-publish after changing `public/` with `tools/deploy-pages.sh`.
+- **Server (Node) — Render:** https://dual-2048.onrender.com — serves the same game
+  static files, adds the API and runs the compactor.
 - **Source:** https://github.com/dimkadimon/dual-2048
 
 ### Deploying
