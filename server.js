@@ -86,6 +86,31 @@ function readSnapshot() {
   } catch (e) { return []; }
 }
 
+/* When the store is refusing this host, the snapshot in the repo is what keeps
+   the API useful. Pull the newest one from GitHub (a different host, so the
+   store's per-IP quota does not apply) rather than the copy baked into the
+   container at deploy time — that copy can be hours old. */
+const SNAPSHOT_URL = process.env.SNAPSHOT_URL ||
+  'https://raw.githubusercontent.com/dimkadimon/dual-2048/main/public/archive.json';
+let remoteSnapshot = null;
+let remoteSnapshotAt = 0;
+const SNAPSHOT_TTL = parseInt(process.env.SNAPSHOT_TTL || '600000', 10);
+
+async function freshSnapshot() {
+  if (Date.now() - remoteSnapshotAt < SNAPSHOT_TTL && remoteSnapshot) return remoteSnapshot;
+  try {
+    const r = await fetch(SNAPSHOT_URL, { cache: 'no-store' });
+    if (r.ok) {
+      const list = await r.json();
+      if (Array.isArray(list) && list.length) {
+        remoteSnapshot = list.filter((e) => e && e.name != null && Number.isFinite(Number(e.ts)));
+        remoteSnapshotAt = Date.now();
+      }
+    }
+  } catch (e) { /* offline or GitHub unreachable — the local file still works */ }
+  return remoteSnapshot || readSnapshot();
+}
+
 function loadCacheFile() {
   try {
     const j = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf8'));
@@ -123,9 +148,9 @@ async function board(maxAge) {
   } catch (e) {
     backOff();
   }
-  // Degraded: serve the union of everything we already know plus the snapshot
-  // committed in the repo, so the mirror is never less complete than the file.
-  const snap = readSnapshot();
+  // Degraded: serve the union of everything we already know plus the newest
+  // snapshot, so the mirror is never less complete than the archive in the repo.
+  const snap = await freshSnapshot();
   if (snap.length) {
     const merged = lb.collapse(lb.merge(cache.entries, snap));
     if (merged.length > cache.entries.length) {
