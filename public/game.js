@@ -852,11 +852,25 @@
     return flushing;
   }
 
+  /* Anyone may compact — the lease in the store makes sure exactly one writer
+     does it at a time. Running it from the client too means the archives stay
+     current (and the ~30-day key expiry stays away) even when no server is up:
+     a static deployment is fully self-maintaining. Throttled, and never
+     awaited — it must not slow the game down. */
+  const LS_COMPACT = 'dual2048-compact-at';
+  function maybeCompact() {
+    const last = Number(lsGet(LS_COMPACT, '0')) || 0;
+    if (Date.now() - last < 10 * 60 * 1000) return;
+    lsSet(LS_COMPACT, String(Date.now()));
+    LB.compact({ quietMs: 60000 }).catch(() => {});
+  }
+
   async function submitGlobal(name, score, maxTile) {
     if (!score) return null;
     const entry = { name, score, maxTile, ts: Date.now() };
     const out = await LB.submit(entry);
     if (!out.ok) pendingAdd(entry);            // never silently drop a score
+    else maybeCompact();                       // keep the archives current
     // rank against what we last saw (+ this play) so the results screen is instant
     const merged = LB.merge(globalCache, [entry]);
     globalCache = merged;
@@ -1252,7 +1266,7 @@
   setScreen('start');
   renderLocal();
   fetchGlobal();
-  flushPending().then(() => fetchGlobal());
+  flushPending().then(() => { maybeCompact(); fetchGlobal(); });
 
   // idle demo board behind the start overlay
   Logic.newGame(st, () => 0.42);
