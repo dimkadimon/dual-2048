@@ -18,7 +18,11 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 say() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 
 say "1. finding the Render service"
-services="$(curl -sf -H "Authorization: Bearer $RENDER_API_KEY" "$API/services?limit=100")"
+services="$(curl -s -H "Authorization: Bearer $RENDER_API_KEY" "$API/services?limit=100")"
+if [ -z "$services" ]; then echo "   could not reach the Render API — check the key"; exit 1; fi
+if ! printf '%s' "$services" | head -c 200 | grep -q '\['; then
+  echo "   Render rejected the request: $(printf '%s' "$services" | head -c 200)"; exit 1
+fi
 read -r SERVICE_ID SERVICE_URL SERVICE_BRANCH <<EOF
 $(printf '%s' "$services" | python3 -c "
 import sys, json
