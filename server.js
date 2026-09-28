@@ -148,9 +148,11 @@ async function board(maxAge) {
   } catch (e) {
     backOff();
   }
-  // Degraded: serve the union of everything we already know plus the newest
-  // snapshot, so the mirror is never less complete than the archive in the repo.
-  const snap = await freshSnapshot();
+  // Degraded: serve the union of everything we already know plus every snapshot
+  // we can find (the one baked into the container at deploy time and the newest
+  // one on GitHub), so the mirror is never less complete than the archive file.
+  // The GitHub copy can lag behind a just-pushed commit (CDN), so union both.
+  const snap = lb.merge(await freshSnapshot(), readSnapshot());
   if (snap.length) {
     const merged = lb.collapse(lb.merge(cache.entries, snap));
     if (merged.length > cache.entries.length) {
