@@ -104,13 +104,16 @@ store from its own IP. The server API is a mirror that now:
   `public/archive.json`, so it is never emptier than a file, and
 - labels what it is serving (`quality: ok | partial | snapshot | cached`).
 
-## Still to do (needs your GitHub/Render access)
+## Finished on the live services
 
-1. **Redeploy the Render service** (`node server.js`) so the server side runs v3.0
-   and its compactor replaces the old one. A push to `main` did **not** trigger a
-   deploy — the site still serves v2.9.10 — so either click *Manual Deploy → Deploy
-   latest commit*, hand over a deploy hook / API key, or stop using that URL: the
-   static site below is already fixed.
-2. **Enable the hourly archive job** (optional): copy `tools/archive-workflow.yml`
-   to `.github/workflows/archive.yml` via the GitHub web UI. Pushing workflow files
-   needs the `workflow` token scope, which is why it ships as a normal file.
+1. **Render is on v3.0.0** (`/api/health?probe=1` reports the bucket, the cache
+   size and per-key store status). `KV_URL` was still holding the v2 value
+   (`.../scores`) and now points at the bucket base.
+2. **Auto-deploy is on** (`autoDeploy: yes`, `autoDeployTrigger: commit`) — it had
+   been "Off", which is why pushing to `main` never reached the service.
+   Render Dashboard: the service → **Settings** → **Auto-Deploy**.
+3. **The hourly archive job is enabled** (`.github/workflows/archive.yml`) and its
+   first run succeeded: GitHub's runners have a clean kvdb quota, so the repo
+   snapshot stays current even though the Render host is rate-limited.
+
+The store itself keeps every play, and both deployments serve the full board.

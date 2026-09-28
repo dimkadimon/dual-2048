@@ -98,8 +98,7 @@ collapse deleted real back-to-back games. That is the version this repo no longe
   clobbered or missing and the history is still complete.
 - **`public/archive.json`** is a permanent snapshot of every score committed to this repo
   (the store itself expires keys after ~30 days). The board reads it as a floor, and the
-  `tools/archive-workflow.yml` workflow refreshes it hourly — copy it to
-  `.github/workflows/archive.yml` once (the GitHub web UI is enough) to switch it on.
+  `.github/workflows/archive.yml` workflow refreshes it hourly.
   `node tools/migrate.js` inspects/updates it, `--write` also folds history into the store.
 
 A play is only ever collapsed when it is *identical* — same player, same score, same best
@@ -150,8 +149,10 @@ node tools/migrate.js --verify  # fail if the archive and the store disagree
   month.
 - **`public/archive.json`** is the belt-and-braces copy: a plain file in this repo with
   every score ever seen, served with the game (and mirrored on raw.githubusercontent.com),
-  and used by the board as a floor. Refresh it by hand with `node tools/migrate.js --write`
-  or switch on the hourly workflow described above.
+  and used by the board as a floor. The hourly
+  [Archive leaderboard](.github/workflows/archive.yml) workflow keeps it current (and can
+  be run by hand from the Actions tab); `node tools/migrate.js --write` does the same
+  locally.
 
 ## Live deployments
 
@@ -159,7 +160,8 @@ node tools/migrate.js --verify  # fail if the archive and the store disagree
   from the `gh-pages` branch; it needs no server because the client talks to the store
   directly. Re-publish after changing `public/` with `tools/deploy-pages.sh`.
 - **Server (Node) — Render:** https://dual-2048.onrender.com — serves the same game
-  static files, adds the API and runs the compactor.
+  static files, adds the API and runs the compactor. Auto-deploy is **On Commit**
+  (service → Settings → Auto-Deploy), so pushing to `main` redeploys it.
 - **Source:** https://github.com/dimkadimon/dual-2048
 
 ### Deploying
