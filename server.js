@@ -2,36 +2,28 @@
    Dual 2048 — server: static files + global leaderboard API
    Zero dependencies. Run: node server.js  (PORT env optional)
 
-   v3.0: the server no longer owns the leaderboard. Scores live in an
-   append-only store (see public/leaderboard.js) that any client can
-   safely write to, and this process only:
-
-     - serves the game,
-     - answers GET/POST /api/scores (compatibility + a fast cached view),
-     - runs the compactor: folds write-once records into the day archives
-       and the hall-of-fame cache, and re-writes them so the store's
-       ~30-day TTL can never eat the history.
-
-   The previous design kept the board in this process, in data/scores.json
-   and in a shared key, and let every browser read-modify-write those
-   lists. On an ephemeral disk plus dozens of independent writers that is
-   a lost-update race, which is why scores went missing and duplicated.
+   Leaderboard storage is layered:
+     - data/scores.json  (local persistence)
+     - KV_URL            (optional shared store, e.g. a kvdb.io bucket)
+       When KV_URL is set, the KV store is the source of truth so
+       multiple deployments (Render, static hosts, sandbox) share
+       one unified global leaderboard even on ephemeral disks.
    ============================================================ */
 'use strict';
 
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
-const Leaderboard = require('./public/leaderboard.js');
 
 const PORT = parseInt(process.env.PORT || '8123', 10);
 const HOST = '0.0.0.0';
 const ROOT = path.join(__dirname, 'public');
-const KV_URL = process.env.KV_URL || Leaderboard.DEFAULT_BUCKET;
-const READ_TTL = parseInt(process.env.READ_TTL || '30000', 10);   // cached board view
-const COMPACT_MS = parseInt(process.env.COMPACT_MS || '120000', 10); // compactor interval
-
-const lb = Leaderboard.create({ bucket: KV_URL, log: (...a) => console.error('[leaderboard]', ...a) });
+const DATA_DIR = path.join(__dirname, 'data');
+const DATA_FILE = path.join(DATA_DIR, 'scores.json');
+const KV_URL = process.env.KV_URL || '';
+const KV_BASE = KV_URL.replace(/\/scores\/?$/, ''); // bucket base (keys: top, scores, arc-*, meta)
+const MAX_STORED = 2000; // hall-of-fame ("top") size
+const SEAL_AT = 2000;    // active log ("scores") seals into a write-once arc-* shard here
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -45,121 +37,228 @@ const MIME = {
   '.woff2': 'font/woff2'
 };
 
-/* ---------------- cached board view ----------------
+/* ---------------- shared KV store (optional) ---------------- */
 
-   The shared store rate-limits by IP (kvdb: ~1000 requests/hour). A server's
-   egress IP can be exhausted by its neighbours, which is exactly what the old
-   "hub" design ran into: every read answered 429 and the hub served an empty
-   board. So this process:
-
-     - retries a little, then backs off entirely for a cooldown
-     - keeps serving the last board it managed to read (memory + data/board.json)
-     - falls back to the snapshot committed in the repo (public/archive.json),
-       which is always available and always complete
-
-   Players never depend on any of this: the browser talks to the store itself,
-   from its own IP. The API here is a convenience mirror. */
-
-const COOLDOWN_MS = parseInt(process.env.COOLDOWN_MS || '300000', 10);   // base backoff
-const COOLDOWN_MAX = parseInt(process.env.COOLDOWN_MAX || '3600000', 10); // ceiling
-let cooldownStep = 0;   // grows while the store keeps refusing us, resets on success
-const CACHE_FILE = process.env.BOARD_CACHE || path.join(__dirname, 'data', 'board.json');
-const SNAPSHOT_FILE = path.join(ROOT, 'archive.json');
-
-let cache = { at: 0, entries: [], quality: 'unknown' };
-let cooldownUntil = 0;
-let lastGood = 0;
-
-function backOff() {
-  cooldownStep = Math.min(cooldownStep + 1, 5);
-  const wait = Math.min(COOLDOWN_MS * Math.pow(2, cooldownStep - 1), COOLDOWN_MAX);
-  cooldownUntil = Date.now() + wait;
-  console.error('[store] refusing this host; backing off for', Math.round(wait / 1000), 's (step ' + cooldownStep + ')');
-}
-
-function storeHealthy() { cooldownStep = 0; cooldownUntil = 0; }
-
-function readSnapshot() {
+/* Returns: array = known state (404 → empty), null = READ FAILED.
+   Writers must never overwrite a key whose read failed. */
+async function kvGet(key) {
+  if (!KV_BASE) return null;
   try {
-    const list = JSON.parse(fs.readFileSync(SNAPSHOT_FILE, 'utf8'));
-    return Array.isArray(list) ? list.filter((e) => e && e.name != null && Number.isFinite(Number(e.ts))) : [];
-  } catch (e) { return []; }
-}
-
-/* When the store is refusing this host, the snapshot in the repo is what keeps
-   the API useful. Pull the newest one from GitHub (a different host, so the
-   store's per-IP quota does not apply) rather than the copy baked into the
-   container at deploy time — that copy can be hours old. */
-const SNAPSHOT_URL = process.env.SNAPSHOT_URL ||
-  'https://raw.githubusercontent.com/dimkadimon/dual-2048/main/public/archive.json';
-let remoteSnapshot = null;
-let remoteSnapshotAt = 0;
-const SNAPSHOT_TTL = parseInt(process.env.SNAPSHOT_TTL || '600000', 10);
-
-async function freshSnapshot() {
-  if (Date.now() - remoteSnapshotAt < SNAPSHOT_TTL && remoteSnapshot) return remoteSnapshot;
-  try {
-    const r = await fetch(SNAPSHOT_URL, { cache: 'no-store' });
-    if (r.ok) {
-      const list = await r.json();
-      if (Array.isArray(list) && list.length) {
-        remoteSnapshot = list.filter((e) => e && e.name != null && Number.isFinite(Number(e.ts)));
-        remoteSnapshotAt = Date.now();
-      }
-    }
-  } catch (e) { /* offline or GitHub unreachable — the local file still works */ }
-  return remoteSnapshot || readSnapshot();
-}
-
-function loadCacheFile() {
-  try {
-    const j = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf8'));
-    if (j && Array.isArray(j.entries) && j.entries.length) {
-      cache = { at: 0, entries: j.entries, quality: 'cached' };
-      lastGood = Number(j.at) || 0;
-    }
-  } catch (e) { /* first run */ }
-}
-
-function saveCacheFile() {
-  try {
-    fs.mkdirSync(path.dirname(CACHE_FILE), { recursive: true });
-    fs.writeFileSync(CACHE_FILE, JSON.stringify({ at: Date.now(), entries: cache.entries.slice(0, 5000) }));
-  } catch (e) { /* disk full / read-only: the in-memory cache still works */ }
-}
-
-async function board(maxAge) {
-  if (cache.entries.length && Date.now() - cache.at < (maxAge == null ? READ_TTL : maxAge)) return cache.entries;
-  if (Date.now() < cooldownUntil) return cache.entries;          // store is busy: serve what we have
-  try {
-    const r = await lb.read({ days: 35 });
-    if (r.sources.quality !== 'offline') {
-      storeHealthy();
-      const fresh = r.entries.length ? r.entries : cache.entries;
-      cache = { at: Date.now(), entries: fresh, quality: r.sources.quality };
-      lastGood = Date.now();
-      saveCacheFile();
-      return cache.entries;
-    }
-    // The store is refusing to talk to this host. Back off exponentially: a
-    // host whose egress IP is out of quota must not keep burning requests
-    // (it cannot win, and it makes the quota situation worse for everyone).
-    backOff();
+    const r = await fetch(KV_BASE + '/' + key, { cache: 'no-store' });
+    if (r.status === 404) return [];
+    if (!r.ok) return null;
+    const t = (await r.text()).trim();
+    if (!t) return [];
+    const a = JSON.parse(t);
+    return Array.isArray(a) ? a : null;
   } catch (e) {
-    backOff();
+    return null;
   }
-  // Degraded: serve the union of everything we already know plus every snapshot
-  // we can find (the one baked into the container at deploy time and the newest
-  // one on GitHub), so the mirror is never less complete than the archive file.
-  // The GitHub copy can lag behind a just-pushed commit (CDN), so union both.
-  const snap = lb.merge(await freshSnapshot(), readSnapshot());
-  if (snap.length) {
-    const merged = lb.collapse(lb.merge(cache.entries, snap));
-    if (merged.length > cache.entries.length) {
-      cache = { at: Date.now(), entries: merged, quality: 'snapshot' };
+}
+
+async function kvGetRaw(key) {
+  if (!KV_BASE) return null;
+  try {
+    const r = await fetch(KV_BASE + '/' + key, { cache: 'no-store' });
+    if (!r.ok) return null;
+    return JSON.parse(await r.text());
+  } catch (e) {
+    return null;
+  }
+}
+
+async function kvPut(key, list) {
+  if (!KV_BASE) return false;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const r = await fetch(KV_BASE + '/' + key, { method: 'PUT', body: JSON.stringify(list) });
+      if (r.ok) return true;
+      console.error('kv put failed:', key, r.status, (await r.text()).slice(0, 120));
+    } catch (e) {
+      console.error('kv sync failed:', key, e.message);
     }
+    await new Promise((r) => setTimeout(r, 400));
   }
-  return cache.entries;
+  return false;
+}
+
+/* Throttled KV refresh: kvdb rate-limits chatty IPs, so we read the shared
+   store at most once per KV_TTL ms and serve from memory in between. */
+const KV_TTL = parseInt(process.env.KV_TTL || '30000', 10);
+let kvCache = { at: 0, top: null, day: null };
+async function kvRefresh(force) {
+  const now = Date.now();
+  if (!force && now - kvCache.at < KV_TTL && kvCache.top !== undefined) return kvCache;
+  const today = 'arc-' + new Date().toISOString().slice(0, 10);
+  const [top, day] = await Promise.all([kvGet('top'), kvGet(today)]);
+  kvCache = { at: now, top, day };
+  return kvCache;
+}
+
+/* Serialize all KV read-modify-writes through one queue: concurrent
+   requests must never interleave their read→write windows or they
+   clobber each other's scores. */
+let kvLock = Promise.resolve();
+function kvSerial(fn) {
+  const run = () => fn();
+  const p = kvLock.then(run, run);
+  kvLock = p.catch(() => {});
+  return p;
+}
+
+/* ---- top is a DERIVED cache; the day shards are the source of truth ---- */
+const TOP_MIN = parseInt(process.env.TOP_MIN || '500', 10);
+
+async function readAllShards() {
+  const now = Date.now();
+  const keys = [];
+  for (let i = 0; i <= 31; i++) keys.push('arc-' + new Date(now - i * 86400000).toISOString().slice(0, 10));
+  const lists = await Promise.all(keys.map((k) => kvGet(k)));
+  const out = [];
+  for (const l of lists) if (l) out.push(...l);
+  return out;
+}
+
+/* Rebuild the hall-of-fame from the union of every shard + the current top.
+   Immune to stale/clobbered top replicas: shards always replenish it. */
+async function rebuildTop() {
+  const [top, shardPool] = await Promise.all([kvGet('top'), readAllShards()]);
+  const topUniq = applyCaps(top || []);
+  const union = applyCaps(topUniq.concat(shardPool));
+  const key = (l) => l.map((e) => e.ts + '|' + e.name).join(',');
+  if (union.length >= topUniq.length && key(union) !== key(topUniq)) {
+    const ok = await kvPut('top', union);
+    return ok ? union : topUniq;
+  }
+  return topUniq;
+}
+
+/* Append a score: hall-of-fame key + today's day shard (arc-YYYY-MM-DD).
+   Day shards are the full archive; the store's TTL rotates them after ~30 days. */
+async function kvSubmit(entry) {
+  const day = 'arc-' + new Date(entry.ts).toISOString().slice(0, 10);
+  let [top, dayList] = await Promise.all([kvGet('top'), kvGet(day)]);
+  if (top === null || dayList === null) {
+    // kvdb intermittently serves stale/429 from this IP — retry failed reads once
+    await new Promise((r) => setTimeout(r, 600));
+    if (top === null) top = await kvGet('top');
+    if (dayList === null) dayList = await kvGet(day);
+  }
+  if (dayList === null) return null; // unknown day state — never write blind
+  const base = applyCaps(top || []);
+  const topHealthy = top !== null && base.length >= TOP_MIN && top.length === base.length;
+  let newTop;
+  let topOk = true;
+  if (topHealthy) {
+    newTop = applyCaps(base.concat([entry]));
+    topOk = await kvPut('top', newTop);
+  } else {
+    // top replica is missing, suspiciously small, or duplicate-riddled: NEVER
+    // write over it (that clobbers the real list). The day shard is the source
+    // of truth — record there and rebuild top in the background.
+    newTop = applyCaps(scores.concat(base, [entry]));
+    kvSerial(() => rebuildTop().then((r) => {
+      if (r && r.length) {
+        const seen = new Set(r.map((e) => e.ts + '|' + e.name));
+        scores = applyCaps(r.concat(scores.filter((e) => !seen.has(e.ts + '|' + e.name))));
+        console.log('top rebuilt from shards:', r.length, 'entries');
+      }
+    }).catch(() => {}));
+  }
+  const ek = entry.ts + '|' + entry.name;
+  const dayOk = await kvPut(day, dayList.some((e) => e.ts + '|' + e.name === ek) ? dayList : dayList.concat([entry]));
+  // honest result: both intended writes must succeed, otherwise report failure
+  // (503) so the client persists directly instead of believing a lie
+  if (!topOk || !dayOk) return null;
+  return newTop;
+}
+
+/* ---------------- leaderboard storage ---------------- */
+
+/* The board starts empty — players populate it. */
+function seed() {
+  return [];
+}
+
+function saveFile(list) {
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(DATA_FILE, JSON.stringify(list, null, 2));
+  } catch (e) {
+    console.error('Failed to save scores file:', e.message);
+  }
+}
+
+async function loadScores() {
+  let local = [];
+  try {
+    const raw = fs.readFileSync(DATA_FILE, 'utf8');
+    const list = JSON.parse(raw);
+    if (Array.isArray(list)) local = list;
+  } catch (e) { /* no local file yet */ }
+
+  if (KV_BASE) {
+    const kv = await kvGet('top');
+    if (kv && kv.length) {
+      // merge local + shared so neither side's entries are lost, then push the
+      // superset back so every deployment converges on the same board
+      const seen = new Set(kv.map((e) => e.ts + '|' + e.name));
+      const extra = local.filter((e) => !seen.has(e.ts + '|' + e.name));
+      const merged = applyCaps(kv.concat(extra));
+      saveFile(merged);
+      if (extra.length) kvPut('top', merged); // only write when boot actually adds entries
+      return merged;
+    }
+    if (kv === null) { /* shared store unreachable — never seed over unknown state */ }
+    else if (local.length) { kvPut('top', local); return applyCaps(local); } // seed an empty shared store
+  }
+
+  if (local.length) return applyCaps(local);
+  const s = seed();
+  saveFile(s);
+  return s;
+}
+
+/* Near-dupe filter: two entries with the same name+score less than 10 minutes
+   apart cannot be separate finished games — they are double-writes from an
+   interrupted submit. Keeps the earliest of each cluster, preserves input order. */
+function nearDedupe(list) {
+  const byTs = list.slice().sort((a, b) => a.ts - b.ts);
+  const lastKept = new Map();
+  const drop = new Set();
+  for (const e of byTs) {
+    const gk = e.name + '|' + e.score;
+    const t = lastKept.get(gk);
+    if (t !== undefined && e.ts - t < 600000) { drop.add(e.ts + '|' + e.name); continue; }
+    lastKept.set(gk, e.ts);
+  }
+  return drop.size ? list.filter((e) => !drop.has(e.ts + '|' + e.name)) : list;
+}
+
+function applyCaps(list) {
+  // idempotent: same ts|name can only ever appear once, and same name+score
+  // clusters inside the impossible-replay window collapse to their first entry
+  const uniq = nearDedupe(list);
+  uniq.sort((a, b) => b.score - a.score || a.ts - b.ts);
+  return uniq.slice(0, MAX_STORED);
+}
+
+let scores = [];
+
+/* ---------------- simple rate limit ---------------- */
+
+const RATE_MS = parseInt(process.env.RATE_MS || '1500', 10);
+const HUB_SELF = process.env.HUB_SELF === '1';
+const HUB_API = 'https://dual-2048.onrender.com/api/scores'; // single serialized writer for the shared board
+
+const lastPost = new Map(); // ip -> ts
+function rateOk(ip) {
+  const now = Date.now();
+  const prev = lastPost.get(ip) || 0;
+  if (now - prev < RATE_MS) return false;
+  lastPost.set(ip, now);
+  if (lastPost.size > 5000) lastPost.clear();
+  return true;
 }
 
 /* ---------------- helpers ---------------- */
@@ -169,13 +268,12 @@ function sendJSON(res, code, obj) {
   res.writeHead(code, {
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store',
-    'Access-Control-Allow-Origin': '*',
     'Content-Length': Buffer.byteLength(body)
   });
   res.end(body);
 }
 
-function readBody(req, limit = 4096) {
+function readBody(req, limit = 10 * 1024) {
   return new Promise((resolve, reject) => {
     let size = 0;
     const chunks = [];
@@ -189,15 +287,8 @@ function readBody(req, limit = 4096) {
   });
 }
 
-const RATE_MS = parseInt(process.env.RATE_MS || '750', 10);
-const lastPost = new Map();
-function rateOk(ip) {
-  const now = Date.now();
-  const prev = lastPost.get(ip) || 0;
-  if (now - prev < RATE_MS) return false;
-  lastPost.set(ip, now);
-  if (lastPost.size > 5000) lastPost.clear();
-  return true;
+function sanitizeName(n) {
+  return String(n || '').replace(/[<>]/g, '').trim().slice(0, 16) || 'ANON';
 }
 
 /* ---------------- server ---------------- */
@@ -205,6 +296,24 @@ function rateOk(ip) {
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   const p = url.pathname;
+
+  // --- API ---
+  if (p === '/api/scores' && req.method === 'GET') {
+    if (KV_BASE) {
+      await kvSerial(async () => {
+        const { top: remote, day: dayList } = await kvRefresh();
+        const pool = (remote || []).concat(dayList || []);
+        if (remote !== null && pool.length) {
+          // READ-ONLY merge for the served view. GET must never write to the
+          // store: a "heal" rewrite here caused a storm that bred duplicates.
+          const seen = new Set(pool.map((e) => e.ts + '|' + e.name));
+          scores = applyCaps(pool.concat(scores.filter((e) => !seen.has(e.ts + '|' + e.name))));
+        }
+      });
+    }
+    res.setHeader('Access-Control-Allow-Origin', '*'); // let the board page union across deployments
+    return sendJSON(res, 200, { ok: true, scores: scores.slice(0, 50) });
+  }
 
   if (p === '/api/scores' && req.method === 'OPTIONS') {
     res.writeHead(204, {
@@ -216,88 +325,85 @@ const server = http.createServer(async (req, res) => {
     return res.end();
   }
 
-  if (p === '/api/scores' && req.method === 'GET') {
-    try {
-      const entries = await board();
-      return sendJSON(res, 200, { ok: true, scores: entries.slice(0, 50), total: entries.length, quality: cache.quality });
-    } catch (e) {
-      return sendJSON(res, 200, { ok: true, scores: cache.entries.slice(0, 50), total: cache.entries.length, quality: 'stale' });
-    }
-  }
-
-  if (p === '/api/health') {
-    const out = {
-      ok: true,
-      store: KV_URL,
-      bucket: lb.bucket,
-      cached: cache.entries.length,
-      quality: cache.quality,
-      lastGoodRead: lastGood ? new Date(lastGood).toISOString() : null,
-      storeCooldownSec: Math.max(0, Math.round((cooldownUntil - Date.now()) / 1000))
-    };
-    if (url.searchParams.get('probe')) {
-      // what THIS host sees when it talks to the store: status codes + timing,
-      // so a deployment that cannot reach the store says so out loud
-      const t0 = Date.now();
-      const [top, live, shards, one] = await Promise.all([
-        lb.kvGet('top', 8000),
-        lb.kvList('q/', 8000),
-        lb.kvList('arc-', 8000),
-        lb.kvGet('arc-' + new Date().toISOString().slice(0, 10), 8000)
-      ]);
-      out.probe = {
-        ms: Date.now() - t0,
-        top: top.ok ? (Array.isArray(top.value) ? top.value.length : (top.missing ? 'missing' : 'empty')) : 'ERR ' + top.status,
-        live: live.ok ? live.keys.length : 'ERR ' + live.status,
-        shards: shards.ok ? shards.keys.length : 'ERR ' + shards.status,
-        today: one.ok ? (Array.isArray(one.value) ? one.value.length : (one.missing ? 'missing' : 'empty')) : 'ERR ' + one.status
-      };
-    }
-    return sendJSON(res, 200, out);
-  }
-
   if (p === '/api/scores' && req.method === 'POST') {
     const ip = req.socket.remoteAddress || 'unknown';
     if (!rateOk(ip)) return sendJSON(res, 429, { ok: false, error: 'slow down' });
     let payload;
-    try { payload = JSON.parse(await readBody(req)); }
-    catch (e) { return sendJSON(res, 400, { ok: false, error: 'bad request' }); }
-
-    const entry = lb.clean(payload);
-    if (!entry) return sendJSON(res, 400, { ok: false, error: 'invalid score' });
-
-    const out = await lb.submit(entry);
-    if (!out.ok) return sendJSON(res, 503, { ok: false, error: 'store unavailable' });
-
-    // rank against the current view (the record itself is durable regardless)
-    let rank = 1, total = 1, isPB = true;
     try {
-      const entries = await board();
-      const merged = lb.merge(entries, [entry]);
-      rank = merged.findIndex((e) => lb.idOf(e) === lb.idOf(entry)) + 1;
-      total = merged.length;
-      if (!rank) rank = merged.length;
-      isPB = !merged.some((e) => lb.idOf(e) !== lb.idOf(entry) &&
-        String(e.name).toLowerCase() === entry.name.toLowerCase() && e.score > entry.score);
-      cache = { at: Date.now(), entries: merged, quality: 'ok' };
-    } catch (e) { /* the score is stored; the view refreshes on the next read */ }
+      payload = JSON.parse(await readBody(req));
+    } catch (e) {
+      return sendJSON(res, 400, { ok: false, error: 'bad request' });
+    }
+    const score = Math.floor(Number(payload.score));
+    const maxTile = Math.floor(Number(payload.maxTile)) || 0;
+    if (!Number.isFinite(score) || score < 0 || score > 1e9) {
+      return sendJSON(res, 400, { ok: false, error: 'invalid score' });
+    }
+    // unified timestamp: clients send the ts they will ALSO use for their
+    // direct-write fallback, so a slow hub response can never record the same
+    // play twice (both paths produce the identical ts|name key)
+    const nowTs = Date.now();
+    let ts = Number(payload.ts);
+    if (!Number.isFinite(ts) || Math.abs(ts - nowTs) > 600000) ts = nowTs;
+    const entry = { name: sanitizeName(payload.name), score, maxTile, ts };
 
-    setTimeout(() => lb.compact({ serial: true }).catch(() => {}), 3000).unref?.();
-    return sendJSON(res, 200, { ok: true, rank, total, isPB });
+    // non-hub deployments forward to the hub so exactly one writer touches the KV store
+    const isHub = HUB_SELF || (req.headers.host || '').endsWith('dual-2048.onrender.com');
+    if (KV_BASE && !isHub) {
+      try {
+        const fr = await fetch(HUB_API, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: payload.name, score: payload.score, maxTile: payload.maxTile, ts })
+        });
+        if (fr.ok) {
+          const j = await fr.json();
+          res.setHeader('Access-Control-Allow-Origin', '*');
+          return sendJSON(res, 200, j);
+        }
+      } catch (e) { /* hub asleep — write locally as fallback */ }
+    }
+
+    // hall-of-fame + sharded log first so reads see this write (serialized: one writer at a time)
+    let hof = null;
+    if (KV_BASE) hof = await kvSerial(() => kvSubmit(entry));
+    if (KV_BASE && hof === null) {
+      // KV store unreachable from this instance — tell the client so IT writes
+      // directly instead of believing the score was persisted (prevents silent loss)
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      return sendJSON(res, 503, { ok: false, error: 'store unavailable' });
+    }
+    if (hof) kvCache = { at: 0, top: null, day: null }; // invalidate refresh cache
+    if (hof) {
+      const seen = new Set(hof.map((e) => e.ts + '|' + e.name));
+      scores = applyCaps(hof.concat(scores.filter((e) => !seen.has(e.ts + '|' + e.name))));
+    } else {
+      scores = applyCaps(scores.concat([entry]));
+    }
+    saveFile(scores);
+
+    const ref = hof || scores;
+    const rank = ref.findIndex((e) => e === entry) + 1 ||
+                 ref.filter((e) => e.score > entry.score).length + 1;
+    const isPB = !ref.some((e) => e !== entry && String(e.name).toLowerCase() === entry.name.toLowerCase() && e.score > entry.score);
+    res.setHeader('Access-Control-Allow-Origin', '*'); // clients on any host may submit through this hub
+    return sendJSON(res, 200, { ok: true, rank: rank || ref.length, total: ref.length, isPB });
   }
 
   if (p.startsWith('/api/')) return sendJSON(res, 404, { ok: false, error: 'not found' });
-  if (req.method !== 'GET' && req.method !== 'HEAD') { res.writeHead(405); return res.end(); }
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    res.writeHead(405); return res.end();
+  }
 
-  /* ---------------- static ---------------- */
-
+  // --- static ---
   let file = p === '/' ? '/index.html' : p;
-  file = path.normalize(file).replace(/^(\.\.[\\/])+/, '');
+  file = path.normalize(file).replace(/^(\.\.[/\\])+/, '');
   const full = path.join(ROOT, file);
   if (!full.startsWith(ROOT)) { res.writeHead(403); return res.end('Forbidden'); }
 
   fs.stat(full, (err, stat) => {
     if (err || !stat.isFile()) {
+      // SPA-ish fallback to index for unknown paths without extension
       if (!path.extname(full)) {
         return fs.createReadStream(path.join(ROOT, 'index.html'))
           .on('error', () => { res.writeHead(404); res.end('Not found'); })
@@ -316,29 +422,27 @@ const server = http.createServer(async (req, res) => {
   });
 });
 
-/* ---------------- compactor ---------------- */
-
 (async () => {
-  loadCacheFile();
-  server.listen(PORT, HOST, () => {
-    console.log(`Dual 2048 running at http://${HOST}:${PORT}  (store: ${KV_URL})`);
-  });
-
-  const pass = async (why) => {
-    if (Date.now() < cooldownUntil) return;
-    try {
-      const stats = await lb.compact({ serial: true });
-      if (stats.skipped === 'list-failed') backOff(); else if (stats.scanned || stats.kept) storeHealthy();
-      if (stats.ingested || stats.deleted || stats.kept) {
-        console.log(`[compact:${why}]`, JSON.stringify(stats));
+  scores = applyCaps(await loadScores());
+  if (KV_BASE) {
+    // Day shards are the source of truth; 'top' is a derived cache. Rebuild it
+    // at boot and every 30 min so stale/clobbered replicas self-heal.
+    const rebuild = () => kvSerial(async () => {
+      try {
+        const r = await rebuildTop();
+        if (r && r.length) {
+          const seen = new Set(r.map((e) => e.ts + '|' + e.name));
+          scores = applyCaps(r.concat(scores.filter((e) => !seen.has(e.ts + '|' + e.name))));
+          console.log('top rebuilt from shards:', r.length, 'entries');
+        }
+      } catch (e) {
+        console.error('top rebuild failed:', e.message);
       }
-      if (stats.ingested || stats.deleted) cache.at = 0;   // view is stale now
-    } catch (e) {
-      console.error('[compact] failed:', e && e.message);
-    }
-  };
-
-  await pass('boot');
-  setInterval(() => pass('tick'), COMPACT_MS).unref?.();
-  process.on('SIGTERM', () => { server.close(() => process.exit(0)); });
+    });
+    rebuild();
+    setInterval(rebuild, 10 * 60 * 1000);
+  }
+  server.listen(PORT, HOST, () => {
+    console.log(`Dual 2048 running at http://${HOST}:${PORT}` + (KV_URL ? ' (KV sync on)' : ''));
+  });
 })();
