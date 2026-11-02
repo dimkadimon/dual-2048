@@ -1276,9 +1276,16 @@
   // refresh whenever the player comes back to the tab (their own score, their
   // friends' scores) without re-fetching on every focus while playing
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible' && gstate === 'start') fetchGlobal();
+    if (document.visibilityState !== 'visible') return;
+    flushPending();                              // deliver anything the store refused earlier
+    if (gstate === 'start') fetchGlobal();
   });
   window.addEventListener('focus', () => { if (gstate === 'start') fetchGlobal(); });
+  // a score that could not be stored (store rate-limited, tab closed mid-submit)
+  // is retried while the tab is open instead of waiting for the next page load
+  setInterval(() => {
+    if (pendingAll().length) flushPending().then(() => fetchGlobal());
+  }, 120000);
 
   // idle demo board behind the start overlay
   Logic.newGame(st, () => 0.42);
