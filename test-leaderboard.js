@@ -298,6 +298,97 @@ const entry = (name, score, ts, tile) => ({ name, score, maxTile: tile || 64, ts
     await kv.stop();
   });
 
+  /* ------------------------------------------------------------------
+     Regressions for the "my new score does not show up" reports. Each one
+     reproduces a real failure of the deployed client.
+     ---------------------------------------------------------------- */
+
+  await test('a truncated (unparseable) hall of fame is rebuilt, never overwritten with nothing', async () => {
+    const kv = createMockKV();
+    const url = await kv.start();
+    const lb = Leaderboard.create({ bucket: url + '/bucket' });
+    const t = Date.now() - 3600000;
+    // 20 archived plays ...
+    for (let i = 0; i < 20; i++) await lb.submit(entry('Arch' + i, 500 + i, t + i * 1000));
+    await lb.compact({ quietMs: 0 });
+    // ... and the exact corruption found in the live store: `top` cut off
+    // mid-row, which JSON.parse rejects
+    const good = kv.dump()['top'];
+    kv.put('top', good.slice(0, Math.floor(good.length / 2)));
+    // a new play arrives: it must land in the archive AND `top` must recover
+    const fresh = entry('Nekras', 878, Date.now() - 60000);
+    const r = await lb.submit(fresh);
+    assert(r.ok, 'submit works while top is corrupt');
+    await lb.compact({ quietMs: 0 });
+    const raw = JSON.parse(kv.dump()['top']);
+    assert(Array.isArray(raw), 'top parses again');
+    assert(raw.some((e) => e.name === 'Nekras' && e.score === 878), 'the new play is in the hall of fame');
+    assert(raw.filter((e) => e.name.startsWith('Arch')).length === 20,
+      'and the rebuilt hall of fame still holds every archived play, got ' +
+      raw.filter((e) => e.name.startsWith('Arch')).length);
+    await kv.stop();
+  });
+
+  await test('a big day is chunked so no archive key can be truncated', async () => {
+    const kv = createMockKV();
+    const url = await kv.start();
+    const lb = Leaderboard.create({ bucket: url + '/bucket' });
+    const t = Date.now() - 7200000;
+    const n = 1600;                                  // more than one chunk
+    const plays = [];
+    for (let i = 0; i < n; i++) plays.push(entry('Bulk' + (i % 7), 100 + i, t + i * 100));
+    const res = await lb.ingest(plays);
+    assert.strictEqual(res.entries, n, 'every play was ingested, got ' + res.entries);
+    const day = lb.dayKey(t);
+    const dayKeys = kv.keys().filter((k) => k === day || k.indexOf(day + '.') === 0);
+    assert(dayKeys.length > 1, 'the day spills into more than one key, got ' + dayKeys.length);
+    for (const k of dayKeys) {
+      const rows = JSON.parse(kv.dump()[k]);
+      assert(rows.length <= 1500, k + ' stays small, got ' + rows.length + ' rows');
+    }
+    const board = await lb.read({ days: 3 });
+    assert.strictEqual(board.entries.length, n, 'all plays are on the board, got ' + board.entries.length);
+    await kv.stop();
+  });
+
+  await test('plays that only exist in an old arc-<timestamp> snapshot are still shown', async () => {
+    const kv = createMockKV();
+    const url = await kv.start();
+    const lb = Leaderboard.create({ bucket: url + '/bucket' });
+    const t = Date.now() - 30 * 86400000;
+    // a v2.x full-board snapshot: keys no v2.x reader ever asked for
+    kv.put('arc-' + (t - 1000), JSON.stringify([
+      entry('Lukomor', 589, t, 48), entry('Nekras', 878, t + 1000, 64)
+    ]));
+    await lb.submit(entry('Newcomer', 300, Date.now() - 60000));
+    const current = await lb.read({ days: 3 });
+    assert(!current.entries.some((e) => e.name === 'Lukomor'), 'a recent-days board does not need to read 35 snapshots');
+    const full = await lb.read({ days: 400, history: true });
+    assert(full.entries.some((e) => e.name === 'Lukomor' && e.score === 589), 'the history read recovers Lukomor');
+    assert(full.entries.some((e) => e.name === 'Nekras' && e.score === 878), 'and Nekras');
+    assert.strictEqual(full.entries.length, 3, 'every play exactly once, got ' + full.entries.length);
+    await kv.stop();
+  });
+
+  await test('a new play is visible on the very next read (no stale board after a submit)', async () => {
+    const kv = createMockKV();
+    const url = await kv.start();
+    const lb = Leaderboard.create({ bucket: url + '/bucket' });
+    // an existing board ...
+    for (let i = 0; i < 5; i++) await lb.submit(entry('Veteran', 400 + i, Date.now() - 600000 + i * 1000));
+    // ... plus a play submitted while a compaction is running
+    kv.fail('put', 'arc-', 1, 500);
+    const compacting = lb.compact({ quietMs: 0 });
+    const r = await lb.submit(entry('Nekras', 878, Date.now()));
+    assert(r.ok, 'submit succeeds during compaction');
+    await compacting;
+    const board = await lb.read({ days: 3 });
+    assert(board.entries.some((e) => e.name === 'Nekras' && e.score === 878),
+      'the new play is on the board immediately');
+    assert.strictEqual(board.entries.length, 6, 'nothing was lost, got ' + board.entries.length);
+    await kv.stop();
+  });
+
   /* ---------------------------------------------------------------- */
   console.log(results.join('\n'));
   console.log('\n  ' + passed + ' passed, ' + failed + ' failed');

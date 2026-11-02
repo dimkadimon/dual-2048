@@ -43,6 +43,21 @@ async function test(name, fn) {
     assert(html.includes('leaderboard.js'), 'index.html must load the shared leaderboard module');
   });
 
+  /* Regression guard: the deployed client once silently reverted to the v2.x
+     read-modify-write leaderboard (a commit that only meant to drop a pause
+     button, with a bumped ?v= so every browser re-downloaded it). That path
+     erases concurrent writers' scores, so the shipped files are checked here. */
+  await test('the shipped client uses the write-once store, not the v2 read-modify-write path', async () => {
+    const html = await (await fetch(API + '/')).text();
+    assert(/<script[^>]+leaderboard\.js/.test(html), 'index.html must load leaderboard.js');
+    const game = await (await fetch(API + '/game.js')).text();
+    assert(game.includes('Leaderboard.create'), 'game.js must use the shared leaderboard core');
+    assert(!/kvAppendDay|kvTopInsert/.test(game), 'game.js must not carry the v2.x clobbering writers');
+    const board = await (await fetch(API + '/board.html')).text();
+    assert(board.includes('Leaderboard.create'), 'board.html must use the shared leaderboard core');
+    assert(/history:\s*true/.test(board), 'the full board must read the history snapshots too');
+  });
+
   await test('browser-style writes (write-once records) land on the board', async () => {
     const t = Date.now() - 3600000;
     await lb.submit({ name: 'Alice', score: 300, maxTile: 48, ts: t });

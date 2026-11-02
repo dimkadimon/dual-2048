@@ -91,6 +91,7 @@ function createMockKV(opts) {
     dump() { return Object.fromEntries([...data.entries()].map(([k, v]) => [k, v.value])); },
     keys() { return [...data.keys()].filter((k) => !expired(k)); },
     expire(key) { data.delete(key); },
+    put(key, value) { data.set(key, { value, at: Date.now() }); },   // seed / corrupt a key
     start() {
       return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve('http://127.0.0.1:' + server.address().port)));
     },

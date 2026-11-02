@@ -64,6 +64,28 @@ keeps working:
 npx surge ./public yourdomain.surge.sh     # or Netlify / GitHub Pages / S3 …
 ```
 
+## v3.0.1 — why new scores went missing, and what changed
+
+The live site was serving an older build than the repo (the "remove HUD pause button"
+commit silently reverted the client back to v2.9.11 **and** bumped its cache version, so
+every returning player re-downloaded the old code at a new URL). Fixing the client alone
+also exposed three ways a *stored* score could stay invisible. All four are fixed:
+
+| # | Bug | Effect | Fix |
+|---|---|---|---|
+| 1 | Production JS was v2.9.11 (`<script src="game.js?v=2.9.11">`, no `leaderboard.js`) | scores were written with the old read-modify-**write** path — concurrent writers erased each other | the v3 write-once client is restored; `npm test` now fails if `index.html` does not load `leaderboard.js` |
+| 2 | The in-game board stopped at the first source that answered — the store is asked for **3 days only** | a play stored in a day archive older than 3 days never showed (65 plays in today's store, incl. Subzero/SunnyStone/dimkadimon sessions) | the in-game list is a union of **all** sources: store, `/api/scores`, `archive.json`, the hub; it never narrows and never blanks |
+| 3 | `arc-<timestamp>` full-board snapshots (written by v2.x, read by nobody) were invisible | whole player histories were missing, e.g. the first 114 recovered plays | `read({history:true})` — the full board page now reads every archive key the store lists |
+| 4 | `top` (the one key every writer touches) is **truncated** in the live store: 16,375 bytes of valid JSON cut off mid-row | every reader sees "unparseable" and every writer risks overwriting the hall of fame with a fragment | a value that is not a list is treated as *unknown*, never as empty; the hall of fame is rebuilt from the archives (boot + every 30 min) and is never seeded from a single instance |
+
+Scores themselves were never at risk: each finished game is one small write-once `q/`
+record, so no submit could be erased or lost. What was broken was the *read* path.
+
+Also fixed while in there: day archives are now **chunked** (`arc-YYYY-MM-DD`,
+`.1`, `.2` — append-only, ≤1500 rows per key). kvdb accepts a large value but can then
+serve a truncated copy of it, which is exactly what happened to `top`; keeping every
+archive key small removes that failure mode for the history as well.
+
 ## How the global leaderboard works (v3)
 
 Every older version had the same flaw: several independent writers (each open browser tab,

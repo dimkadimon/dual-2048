@@ -101,7 +101,12 @@
           var txt = (await r.text()).trim();
           if (!txt) return { ok: true, missing: false, value: null };
           try { return { ok: true, missing: false, value: JSON.parse(txt) }; }
-          catch (e) { return { ok: false, status: 'bad-json' }; }
+          catch (e) {
+            // 2xx but unparseable. The store does this for oversized values
+            // (truncated body) and, occasionally, when it is under load. Callers
+            // treat it as "unknown", never as "empty".
+            return { ok: false, status: 'bad-json', httpStatus: r.status, bytes: txt.length, body: txt.slice(0, 120) };
+          }
         } catch (e) {
           if (t.done) t.done();
           last = { ok: false, status: 'network' };
@@ -271,6 +276,27 @@
     /* ---------- day archive keys ---------- */
 
     function dayKey(ts) { return 'arc-' + new Date(ts).toISOString().slice(0, 10); }
+
+    /* A day is one key while it is small and several keys once it is not:
+
+         arc-YYYY-MM-DD      chunk 0 (the day's first CHUNK_MAX entries)
+         arc-YYYY-MM-DD.1   chunk 1 (the next CHUNK_MAX entries)
+         arc-YYYY-MM-DD.2   …
+
+       Chunks are append-only: a chunk is written only while it has room, and
+       once full it never changes again. So no archive key has to be rewritten
+       forever, and — the reason this matters — no archive key ever grows past
+       CHUNK_MAX rows. kvdb accepts a large value but can then serve a
+       TRUNCATED copy of it (the live `top` key is exactly that today: valid
+       JSON cut off in the middle of a row). Small keys cannot do that. */
+    var CHUNK_MAX = 1500;                         // rows per archive chunk
+
+    function chunkKey(day, i) { return i ? day + '.' + i : day; }
+    function chunkIndex(key, day) {
+      return key === day ? 0 : parseInt(String(key).slice(day.length + 1), 10);
+    }
+
+    // every day key in the window (chunk 0 only; used when listing fails)
     function shardKeys(days, from) {
       var out = [];
       for (var i = 0; i < days; i++) out.push(dayKey((from || now()) - i * DAY));
@@ -309,53 +335,120 @@
 
     async function readLive() {
       var l = await kvList(LIVE_PREFIX);
-      if (!l.ok || !l.keys.length) return l.ok ? [] : null;
-      var vals = await Promise.all(l.keys.map(function (k) { return readRecord(k, 6000); }));
+      if (!l.ok) return null;
+      if (!l.keys.length) return [];
+      // Read in small batches, not all at once: 1000 parallel GETs from one
+      // browser is exactly how a host earns a 429, and a 429 on a record read
+      // used to look like "that play does not exist".
       var out = [];
-      for (var i = 0; i < vals.length; i++) if (vals[i]) for (var j = 0; j < vals[i].length; j++) out.push(vals[i][j]);
+      var BATCH = 8;
+      for (var b = 0; b < l.keys.length; b += BATCH) {
+        var batch = l.keys.slice(b, b + BATCH);
+        var vals = await Promise.all(batch.map(function (k) { return readRecord(k, 6000); }));
+        for (var i = 0; i < vals.length; i++) if (vals[i]) for (var j = 0; j < vals[i].length; j++) out.push(vals[i][j]);
+      }
       return out;
+    }
+
+    /* The store also holds `arc-<timestamp>` keys: full-board snapshots written
+       by v2.x that no v2.x reader ever looked at (it only ever requested
+       hard-coded key names). They contain real plays that exist nowhere else, so
+       a board that wants the *history* reads them too. They are insert-only and
+       never written by this code again. */
+    async function readLegacySnapshots() {
+      var l = await kvList('arc-');
+      if (!l.ok) return null;
+      var snap = l.keys.filter(function (k) { return /^arc-\d{9,}$/.test(k); });
+      if (!snap.length) return [];
+      var out = [];
+      for (var i = 0; i < snap.length; i++) {
+        var rows = await readList(snap[i], 20000);
+        if (rows) out.push.apply(out, rows);
+      }
+      return out;
+    }
+
+    /* Which archive keys exist, in one request. Listing beats guessing: the
+       guess was 35 hard-coded day names (28 of which usually do not exist) and
+       it could not see the `arc-<timestamp>` snapshots at all. */
+    async function archiveKeys() {
+      var l = await kvList('arc-');
+      if (!l.ok) return null;
+      var days = [], legacy = [];
+      for (var i = 0; i < l.keys.length; i++) {
+        var k = l.keys[i];
+        if (/^arc-\d{4}-\d{2}-\d{2}(\.\d+)?$/.test(k)) days.push(k);
+        else if (/^arc-\d{9,}$/.test(k)) legacy.push(k);
+      }
+      return { days: days, legacy: legacy };
     }
 
     /* The board: live records ∪ hall of fame ∪ day archives ∪ legacy keys.
        opts.cache: {get(key), set(key,list)} — used to avoid re-reading days
-       that are already sealed (a day is final once it is 2 days old). */
+       that are already sealed (a day is final once it is 2 days old).
+       opts.days: how far back to read (default SHARD_DAYS).
+       opts.history: also read the v2.x `arc-<timestamp>` snapshots. */
     async function read(opts2) {
         opts2 = opts2 || {};
         var days = opts2.days || SHARD_DAYS;
         var files = opts2.extra || [];              // e.g. the repo archive snapshot
         var cache = opts2.cache || null;
         var sealedBefore = now() - 2 * DAY;         // days older than this never change
+        var oldest = now() - (days - 1) * DAY;
 
-        var shardNames = shardKeys(days);
+        var listing = await archiveKeys();
+        var shardNames = [];
+        var cached = [];
         var tasks = [
           readLive(),
           readList(TOP_KEY),
           readList(LEGACY_KEYS[0])
         ];
-        var cached = [];
+
+        if (listing) {
+          var seenDay = Object.create(null);
+          for (var n = 0; n < listing.days.length; n++) {
+            var k = listing.days[n];
+            var dayIso = k.slice(4, 14);            // YYYY-MM-DD
+            var dayTs = Date.parse(dayIso + 'T00:00:00Z');
+            if (!Number.isFinite(dayTs) || dayTs < oldest - DAY) continue;
+            seenDay[dayIso] = true;
+            shardNames.push(k);
+          }
+          for (var h = 0; h < listing.legacy.length; h++) {
+            if (opts2.history) tasks.push(readList(listing.legacy[h], 20000));
+          }
+        } else {
+          // listing failed: fall back to the day names we would have guessed
+          shardNames = shardKeys(days);
+        }
+
         var toFetch = [];
         for (var i = 0; i < shardNames.length; i++) {
-          var k = shardNames[i];
-          var ts = now() - i * DAY;
-          var c = (cache && ts < sealedBefore) ? cache.get(k) : null;
-          if (Array.isArray(c)) cached.push(c); else toFetch.push(k);
+          var key = shardNames[i];
+          var c = (cache && Date.parse(key.slice(4, 14) + 'T00:00:00Z') < sealedBefore) ? cache.get(key) : null;
+          if (Array.isArray(c)) cached.push(c); else toFetch.push(key);
         }
-        tasks = tasks.concat(toFetch.map(function (k) { return readList(k); }));
+        tasks = tasks.concat(toFetch.map(function (k) { return readList(k, 20000); }));
 
         var res = await Promise.all(tasks);
         var live = res[0], top = res[1], legacy = res[2];
         var fetched = res.slice(3);
+        var shards = [];
         for (var f = 0; f < fetched.length; f++) {
-          if (Array.isArray(fetched[f]) && cache && toFetch[f]) cache.set(toFetch[f], fetched[f]);
+          if (Array.isArray(fetched[f])) {
+            shards.push(fetched[f]);
+            if (cache && toFetch[f]) cache.set(toFetch[f], fetched[f]);
+          }
         }
-        var sources = [live, top, legacy].concat(cached).concat(fetched).concat(files);
+        var sources = [live, top, legacy].concat(shards).concat(cached).concat(files);
         var merged = collapse(merge.apply(null, sources));
         return {
           entries: merged,
           sources: {
             live: live ? live.length : null,
             top: top ? top.length : null,
-            shards: cached.length + fetched.length,
+            shards: shards.length + cached.length,
             quality: (live === null && top === null) ? 'offline' : (live === null || top === null ? 'partial' : 'ok')
           }
         };
@@ -381,26 +474,102 @@
 
     /* Merge entries into a day archive without ever losing what is already
        there: read fresh, union, write, read back, and only report success if
-       every entry is really present. insert-only + verify = no lost updates. */
+       every entry is really present. insert-only + verify = no lost updates.
+
+       `dayKeyName` is the day's first key (`arc-YYYY-MM-DD`); the entries go
+       into its chunks (see CHUNK_MAX) so that no archive key grows past a size
+       the store can serve back intact. A chunk that already holds an entry is
+       not touched — that entry is archived already. */
     async function appendToShard(dayKeyName, entries, tries) {
       tries = tries || 3;
       for (var i = 0; i < tries; i++) {
-        var cur = await readList(dayKeyName);
-        if (cur === null) { await sleep(400 * (i + 1)); continue; }
-        var merged = merge(cur, entries);
-        var w = await kvPut(dayKeyName, merged, 20000);
-        if (!w.ok) { await sleep(400 * (i + 1)); continue; }
-        var back = await readList(dayKeyName);
-        if (back && entries.every(function (e) { return back.some(function (b) { return idOf(b) === idOf(e); }); })) return true;
-        await sleep(300);
+        // the day's chunks, in order
+        var listing = await kvList(dayKeyName, 10000);
+        if (!listing.ok) { await sleep(400 * (i + 1)); continue; }
+        var keys = listing.keys.filter(function (k) {
+          return k === dayKeyName || k.indexOf(dayKeyName + '.') === 0;
+        }).sort(function (a, b) { return chunkIndex(a, dayKeyName) - chunkIndex(b, dayKeyName); });
+        if (!keys.length) keys = [dayKeyName];
+
+        var chunks = [];
+        var readFailed = false;
+        for (var c = 0; c < keys.length; c++) {
+          var rows = await readList(keys[c], 20000);
+          if (rows === null) { readFailed = true; break; }     // unknown state: never write blind
+          chunks.push(rows);
+        }
+        if (readFailed) { await sleep(400 * (i + 1)); continue; }
+
+        var have = Object.create(null);
+        for (var ch = 0; ch < chunks.length; ch++) {
+          for (var j = 0; j < chunks[ch].length; j++) have[idOf(chunks[ch][j])] = true;
+        }
+        var todo = [];
+        for (var t = 0; t < entries.length; t++) if (!have[idOf(entries[t])]) todo.push(entries[t]);
+        if (!todo.length) return true;                          // everything is archived already
+
+        // append to the last chunk while it has room, then start a new one
+        var added = chunks.map(function () { return []; });
+        for (var e = 0; e < todo.length; e++) {
+          var last = chunks.length - 1;
+          if (chunks[last].length + added[last].length >= CHUNK_MAX) {
+            chunks.push([]);
+            added.push([]);
+            last++;
+          }
+          added[last].push(todo[e]);
+        }
+
+        var ok = true;
+        for (var w = 0; w < chunks.length; w++) {
+          if (!added[w].length) continue;
+          var key = chunkKey(dayKeyName, w);
+          var merged = merge(chunks[w], added[w]);
+          var put = await kvPut(key, merged, 20000);
+          if (!put.ok) { ok = false; continue; }
+          var back = await readList(key, 20000);
+          if (!back) { ok = false; continue; }
+          var backIds = Object.create(null);
+          for (var q = 0; q < back.length; q++) backIds[idOf(back[q])] = true;
+          for (var a = 0; a < added[w].length; a++) {
+            if (!backIds[idOf(added[w][a])]) { ok = false; break; }
+          }
+        }
+        if (ok) return true;
+        await sleep(400 * (i + 1));
       }
       return false;
     }
 
+    /* `top` is a cache of the best plays, and it is the one key every client
+       *writes* (the hall of fame is derived, not authoritative). A single
+       oversized PUT has already left a truncated, unparseable value in the live
+       store, and a reader that treats "unparseable" as "empty" would both serve
+       an empty board and overwrite the real list on the next write.
+       So: never write over a list that failed to parse, and rebuild it from the
+       archives (which are write-once / small-key and therefore intact). */
     async function updateTop(entries) {
       for (var i = 0; i < 3; i++) {
-        var cur = await readList(TOP_KEY);
-        if (cur === null) { await sleep(400); continue; }
+        var raw = await kvGet(TOP_KEY, 6000);
+        // 'bad-json' = the store returned something that is not a list: a
+        // truncated value (exactly what the live `top` key is), or another
+        // shape. Writing over it would destroy the hall of fame, so rebuild it
+        // from the archives (which are small keys and therefore intact).
+        if (!raw.ok) {
+          if (raw.status !== 'bad-json') { await sleep(400); continue; }  // read failed: leave it alone
+          if (await rebuildTopFromArchives(entries)) return true;
+          await sleep(400);
+          continue;
+        }
+        var cur = [];
+        if (!raw.missing && raw.value != null) {
+          if (!Array.isArray(raw.value)) {              // wrong shape, same treatment
+            if (await rebuildTopFromArchives(entries)) return true;
+            await sleep(400);
+            continue;
+          }
+          cur = raw.value;
+        }
         var merged = merge(cur, entries).slice(0, TOP_CAP);
         var w = await kvPut(TOP_KEY, merged, 20000);
         if (!w.ok) { await sleep(400); continue; }
@@ -412,6 +581,30 @@
         await sleep(300);
       }
       return false;
+    }
+
+    /* Reconstruct the hall of fame from the day archives + anything the caller
+       is holding. Only ever called when `top` itself is unusable, so there is
+       nothing to clobber. */
+    async function rebuildTopFromArchives(extra) {
+      var pool = [];
+      var listing = await archiveKeys();
+      if (!listing) return false;
+      var keys = listing.days.concat(listing.legacy);
+      for (var k = 0; k < keys.length; k++) {
+        var rows = await readList(keys[k], 20000);
+        if (rows === null) return false;                // a read failed: do not guess
+        if (rows.length) pool.push.apply(pool, rows);
+      }
+      pool.push.apply(pool, extra || []);
+      var merged = merge(pool).slice(0, TOP_CAP);
+      if (!merged.length) return false;
+      var w = await kvPut(TOP_KEY, merged, 20000);
+      if (!w.ok) return false;
+      var back = await readList(TOP_KEY);
+      return !!(back && merged.slice(0, 50).every(function (e) {
+        return back.some(function (b) { return idOf(b) === idOf(e); });
+      }));
     }
 
     /* Insert entries into the archives without requiring a lease: it only
