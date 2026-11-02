@@ -166,6 +166,14 @@ node tools/migrate.js --verify  # fail if the archive and the store disagree
 
 ### Keeping the history forever
 
+> **Enable the 5-minute snapshot (one file, 30 seconds).** `public/archive.json` is the
+> floor both the game and the board fall back to when the store refuses a network, so it
+> should be minutes old, not an hour. The updated workflow lives at
+> `tools/archive-workflow.yml` (cron `*/5 * * * *`); copying it over
+> `.github/workflows/archive.yml` needs a token with the `workflow` scope. Until then the
+> hourly job still works — the board simply leans on the API/hub mirrors for the freshest
+> scores.
+
 - The **store** keeps the last ~30 days alive by itself: the compactor re-writes the
   archive keys in slices (cursor kept in the store), so key expiry never eats a quiet
   month.

@@ -389,6 +389,73 @@ const entry = (name, score, ts, tile) => ({ name, score, maxTile: tile || 64, ts
     await kv.stop();
   });
 
+  /* ------------------------------------------------------------------
+     "My new score is on the in-game top 10 but not on the full board."
+     The in-game list and the full board are two different readers; when the
+     store starts refusing a host (kvdb rate-limits by IP) the full board used
+     to fall back to the committed snapshot alone, which is hours old.
+     ---------------------------------------------------------------- */
+
+  await test('a cached day is reused instead of re-downloaded (fewer requests, fewer 429s)', async () => {
+    const kv = createMockKV();
+    const url = await kv.start();
+    const lb = Leaderboard.create({ bucket: url + '/bucket' });
+    const t = Date.now() - 3600000;
+    await lb.submit(entry('Cached', 700, t));
+    await lb.compact({ quietMs: 0 });
+    const store = {};
+    const marks = {};
+    const cache = {
+      get: (k) => (Array.isArray(store[k]) ? store[k] : null),
+      set: (k, v) => { store[k] = v; marks[k] = Date.now(); },
+      mark: (k) => marks[k] || 0
+    };
+    const before = kv.opCount.get;
+    const first = await lb.read({ days: 40, cache });
+    const afterFirst = kv.opCount.get;
+    const second = await lb.read({ days: 40, cache });
+    const afterSecond = kv.opCount.get;
+    assert.strictEqual(first.entries.length, 1, 'the play is on the board');
+    assert.strictEqual(second.entries.length, 1, 'and still there on the second read');
+    const firstCost = afterFirst - before;
+    const secondCost = afterSecond - afterFirst;
+    assert(secondCost < firstCost,
+      'the warm read must cost fewer requests (' + secondCost + ' vs ' + firstCost + ')');
+    assert(second.sources.cached > 0, 'and it reports the cache hit, got ' + second.sources.cached);
+    await kv.stop();
+  });
+
+  await test('the light read (in-game board) finds a play with three requests', async () => {
+    const kv = createMockKV();
+    const url = await kv.start();
+    const lb = Leaderboard.create({ bucket: url + '/bucket' });
+    await lb.submit(entry('Broski', 949, Date.now() - 60000, 96));
+    const before = kv.opCount.get + kv.opCount.list;
+    const r = await lb.read({ light: true });
+    const cost = (kv.opCount.get + kv.opCount.list) - before;
+    assert(r.entries.some((e) => e.name === 'Broski' && e.score === 949), 'the new play is found');
+    assert(cost <= 4, 'a light read must stay cheap, used ' + cost + ' requests');
+    await kv.stop();
+  });
+
+  await test('a board whose store reads all fail can still be completed from other sources', async () => {
+    const kv = createMockKV();
+    const url = await kv.start();
+    const lb = Leaderboard.create({ bucket: url + '/bucket' });
+    await lb.submit(entry('Broski', 949, Date.now() - 60000, 96));
+    kv.fail('get', '', 9999, 429);
+    kv.fail('list', '', 9999, 429);
+    const store = await lb.read({ days: 40 });
+    assert.strictEqual(store.entries.length, 0, 'the store really is unreadable');
+    assert.strictEqual(store.sources.quality, 'offline', 'and it says so, got ' + store.sources.quality);
+    // what the page must do: union whatever else answered (api / snapshot / cache)
+    const fromApi = [entry('Broski', 949, Date.now() - 60000, 96)];
+    const merged = lb.merge(store.entries, fromApi);
+    assert(merged.some((e) => e.name === 'Broski' && e.score === 949),
+      'a score known to another source must reach the board when the store refuses this host');
+    await kv.stop();
+  });
+
   /* ---------------------------------------------------------------- */
   console.log(results.join('\n'));
   console.log('\n  ' + passed + ' passed, ' + failed + ' failed');

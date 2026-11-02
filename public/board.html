@@ -103,7 +103,7 @@
     </footer>
   </div>
 
-  <script src="leaderboard.js?v=3.0.1"></script>
+  <script src="leaderboard.js?v=3.0.2"></script>
   <script>
     'use strict';
     var $ = function (id) { return document.getElementById(id); };
@@ -132,6 +132,7 @@
       }
     });
 
+    var API_READ = 'https://dual-2048.onrender.com/api/scores';   // a different host: survives a store quota on ours
     var ARCHIVE_URLS = [
       'archive.json',
       'https://raw.githubusercontent.com/dimkadimon/dual-2048/main/public/archive.json'
@@ -139,9 +140,12 @@
     var CACHE_KEY = 'dual2048-v3-daycache';
     var cache = {};
     try { cache = JSON.parse(localStorage.getItem(CACHE_KEY) || '{}'); } catch (e) { cache = {}; }
+    var marks = {};
     function cacheGet(k) { return Array.isArray(cache[k]) ? cache[k] : null; }
+    function cacheMark(k) { return marks[k] || 0; }
     function cacheSet(k, list) {
       cache[k] = list;
+      marks[k] = Date.now();
       try { localStorage.setItem(CACHE_KEY, JSON.stringify(cache)); }
       catch (e) { var ks = Object.keys(cache).sort(); while (ks.length > 10) delete cache[ks.shift()]; try { localStorage.setItem(CACHE_KEY, JSON.stringify(cache)); } catch (e2) {} }
     }
@@ -160,23 +164,86 @@
     }
 
     var lastQuality = '';
+    var shown = [];                      // what is on screen right now (never shrinks)
+    var CACHE_KEY_BOARD = 'dual2048-v31-last-board';
+
+    function saveShown(list) {
+      try { localStorage.setItem(CACHE_KEY_BOARD, JSON.stringify(list.slice(0, 4000))); } catch (e) { /* quota */ }
+    }
+    function loadShown() {
+      // what this page last showed, plus what the GAME last showed in this
+      // browser (same origin) — if a play made it onto the in-game top 10, this
+      // page can show it too even when the store refuses us
+      var out = [];
+      try {
+        var a = JSON.parse(localStorage.getItem(CACHE_KEY_BOARD) || '[]');
+        if (Array.isArray(a)) out = out.concat(a);
+      } catch (e) { /* ignore */ }
+      try {
+        var g = JSON.parse(localStorage.getItem('dual2048-global-v31') || '[]');
+        if (Array.isArray(g)) out = out.concat(g);
+      } catch (e) { /* ignore */ }
+      return LB.merge(out);
+    }
+
+    function withTimeout(p, ms) {
+      return Promise.race([p, new Promise(function (res) { setTimeout(function () { res(null); }, ms); })])
+        .catch(function () { return null; });
+    }
+
+    /* Everything is fetched at the same time and UNIONED. The store can refuse a
+       host (kvdb rate-limits by IP), and this page used to answer that by quietly
+       showing the committed archive.json alone — a board that is hours stale on
+       the exact day people are playing, i.e. "my new score is not on the full
+       board". The API and the hub are different hosts, so one source being
+       throttled can no longer hide a score that another source has. */
     async function load() {
       $('status').textContent = 'loading…';
-      var archive = await grabArchive();   // permanent floor, fetched in parallel-friendly order
-      // days: 400 covers every archive key the store has kept; history: true
-      // also reads the v2.x `arc-<timestamp>` snapshots, which hold plays that
-      // exist in no other key (the old readers never requested those keys, so
-      // whole sessions of players were missing from the board).
-      var r = await LB.read({ days: 400, history: true, cache: { get: cacheGet, set: cacheSet }, extra: [archive] });
-      var list = r.entries;
-      lastQuality = r.sources.quality;
+      var archiveP = grabArchive();
+      var apiP = fetch(API_READ, { cache: 'no-store' })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (j) { return (j && j.scores && j.scores.length) ? j.scores : null; })
+        .catch(function () { return null; });
+      var storeP = withTimeout(
+        // days: 400 covers every archive key the store has kept; history: true
+        // also reads the v2.x `arc-<timestamp>` snapshots, which hold plays that
+        // exist in no other key.
+        LB.read({ days: 400, history: true, cache: { get: cacheGet, set: cacheSet, mark: cacheMark }, extra: [] }),
+        25000
+      );
+
+      // first paint: the committed snapshot (fast, and it survives any store outage)
+      var archive = await withTimeout(archiveP, 8000);
+      if (archive && archive.length) {
+        shown = LB.merge(shown, archive);
+        render(shown);
+        $('status').textContent = shown.length + ' scores · snapshot · updating…';
+      }
+
+      // then the full union: store + api + snapshot + whatever is already shown
+      var r = await storeP;
+      var api = await withTimeout(apiP, 12000);
+      var store = r && r.entries ? r.entries : null;
+      lastQuality = store ? r.sources.quality : 'offline';
+
+      var list = LB.merge(shown, store || [], api || [], archive || []);
+      if (!list.length) list = LB.merge(loadShown());
       if (!list.length) {
         $('status').innerHTML = '<span class="err">board offline — try again</span>';
         return;
       }
+      shown = list;
+      saveShown(list);
       render(list);
-      $('status').textContent = list.length + ' scores · ' +
-        (r.sources.shards) + ' archives · ' + lastQuality + ' · ' + new Date().toLocaleTimeString();
+
+      var parts = [];
+      var storeOk = !!(store && store.length);
+      if (storeOk) parts.push((r.sources.shards) + ' archives');
+      if (archive && archive.length) parts.push('snapshot');
+      if (api && api.length) parts.push('api');
+      var note = storeOk ? '' : ' — <b class="err">store unreachable from this network</b>, showing every source we could reach';
+      $('status').innerHTML = list.length + ' scores · ' + parts.join(' + ') + ' · ' + lastQuality + ' · ' +
+        new Date().toLocaleTimeString() + note;
     }
 
     function render(list) {
@@ -218,6 +285,8 @@
 
     $('btnRefresh').addEventListener('click', load);
     document.addEventListener('visibilitychange', function () { if (!document.hidden) load(); });
+    shown = loadShown();                  // paint the last board immediately, then refresh
+    if (shown.length) render(shown);
     load();
     setInterval(load, 30000);
   </script>

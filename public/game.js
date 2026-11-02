@@ -744,72 +744,98 @@
 
   let globalCache = [];
   let globalTotal = 0;
-
-  /* Every source is a UNION, not a fallback chain. The old chain stopped at the
-     first source that answered with data, which is how a board could miss plays
-     that only exist in another source (the store's archive, the repo snapshot,
-     the API mirror). Nothing here ever narrows what is already on screen. */
   let globalQuality = '';
+  const LS_GLOBAL = 'dual2048-global-v31';   // last board this browser saw (any source)
+  const LS_DAYS = 'dual2048-days-v31';       // per-day archive rows, so the cache works
 
+  /* A day cache the leaderboard core can use: day rows it has already seen are
+     reused for ten minutes instead of being re-downloaded over and over (each
+     re-download is a request against the store's per-IP limit). */
+  const dayStore = (() => {
+    let rows = {};
+    try { rows = lsJSON(LS_DAYS, {}) || {}; } catch (e) { rows = {}; }
+    const marks = {};
+    let dirty = false;
+    function save() {
+      if (!dirty) return;
+      try { lsSet(LS_DAYS, JSON.stringify(rows)); } catch (e) { /* full: drop it */ }
+      dirty = false;
+    }
+    return {
+      get: (k) => (Array.isArray(rows[k]) ? rows[k] : null),
+      set: (k, list) => {
+        rows[k] = list; marks[k] = Date.now(); dirty = true;
+        const ks = Object.keys(rows);
+        if (ks.length > 45) { dsorted: for (const old of ks.sort()) { if (ks.length <= 45) break; delete rows[old]; } }
+        save();
+      },
+      mark: (k) => marks[k] || 0
+    };
+  })();
+
+  function cacheGlobal() {
+    try { lsSet(LS_GLOBAL, JSON.stringify(globalCache.slice(0, 3000))); } catch (e) { /* quota */ }
+  }
+  function hydrateGlobal() {
+    const saved = lsJSON(LS_GLOBAL, []);
+    if (Array.isArray(saved) && saved.length) globalCache = LB.merge(saved, globalCache);
+  }
+
+  async function timed(promise, ms) {
+    return Promise.race([
+      promise,
+      new Promise((res) => setTimeout(() => res(null), ms))
+    ]).catch(() => null);
+  }
+
+  /* Sources are asked IN PARALLEL and their results are unioned. Sequencing them
+     (and stopping at the first that answered) is what made a score that only one
+     source knew about disappear; a slow or rate-limited store must not delay or
+     hide what the mirrors already have. */
   async function fetchGlobal() {
-    const parts = [];
-    // 1) the shared store — write-once records + hall of fame + day archives.
-    //    One retry: the board is a union of many keys, and a single read that
-    //    fails (the store answers 429 when a host is chatty) must not be the
-    //    difference between a score showing and not showing.
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        const r = await LB.read({ days: 3 });
-        if (r.entries.length) {
-          parts.push(r.entries);
-          globalQuality = r.sources.quality;
-          break;
-        }
-      } catch (e) { /* keep going: a mirror may still answer */ }
-      if (attempt === 0) await new Promise((res) => setTimeout(res, 500));
-    }
-    // 2) this deployment's own API (any server running server.js)
-    try {
-      const ctrl = new AbortController();
-      const to = setTimeout(() => ctrl.abort(), 4000);
-      const res = await fetch('/api/scores', { signal: ctrl.signal });
-      clearTimeout(to);
-      if (res.ok) {
+    const jobs = [
+      // 1) the shared store — hall of fame (+ write-once records), a few requests
+      (async () => {
+        const r = await LB.read({ light: true, cache: dayStore });
+        globalQuality = r.sources.quality;
+        return r.entries;
+      })(),
+      // 2) this deployment's own API (only on a server deploy; 404 on Pages)
+      (async () => {
+        const ctrl = new AbortController();
+        const to = setTimeout(() => ctrl.abort(), 5000);
+        const res = await fetch('/api/scores', { signal: ctrl.signal });
+        clearTimeout(to);
+        if (!res.ok) return null;
         const data = await res.json();
-        if ((data.scores || []).length) parts.push(data.scores);
-      }
-    } catch (e) { /* not served by server.js */ }
-    // 3) the permanent archive committed in the repo (survives any store outage)
-    try {
-      const list = await fetchArchive();
-      if (list.length) parts.push(list);
-    } catch (e) { /* offline */ }
-    // 4) the shared hub API (a different host, so a store quota on this IP
-    //    does not also hide the board)
-    try {
-      const ctrl = new AbortController();
-      const to = setTimeout(() => ctrl.abort(), 6000);
-      const res = await fetch(HUB_API, { signal: ctrl.signal });
-      clearTimeout(to);
-      if (res.ok) {
+        return (data.scores || []).length ? data.scores : null;
+      })(),
+      // 3) the archive committed in this repo (works even when the store refuses us)
+      fetchArchive(),
+      // 4) the hub API (a different host, so a store quota on this IP does not hide the board)
+      (async () => {
+        const ctrl = new AbortController();
+        const to = setTimeout(() => ctrl.abort(), 7000);
+        const res = await fetch(HUB_API, { signal: ctrl.signal });
+        clearTimeout(to);
+        if (!res.ok) return null;
         const data = await res.json();
-        if ((data.scores || []).length) parts.push(data.scores);
-      }
-    } catch (e) { /* fall through */ }
-
-    if (!parts.length) {
-      // nothing answered: keep whatever is on screen rather than blanking it
-      if (!globalCache.length) {
-        const msg = 'Leaderboard offline — try again later!';
-        populateList($('globalList'), [], msg);
-        populateList($('overGlobalList'), [], msg);
-      }
-      return;
+        return (data.scores || []).length ? data.scores : null;
+      })()
+    ];
+    const out = await Promise.all(jobs.map((p) => timed(p, 12000)));
+    const got = out.filter((l) => Array.isArray(l) && l.length);
+    if (got.length) {
+      const before = globalCache.length;
+      globalCache = LB.merge(globalCache, ...got);      // never shrinks
+      globalTotal = globalCache.length;
+      if (globalCache.length !== before) cacheGlobal();
+      renderGlobal();
+    } else if (!globalCache.length) {
+      const msg = 'Leaderboard offline — try again later!';
+      populateList($('globalList'), [], msg);
+      populateList($('overGlobalList'), [], msg);
     }
-    const merged = LB.merge(globalCache, ...parts);   // never shrinks
-    globalCache = merged;
-    globalTotal = merged.length;
-    renderGlobal();
   }
 
   async function fetchArchive() {
@@ -1271,6 +1297,8 @@
   updateHud();
   setScreen('start');
   renderLocal();
+  hydrateGlobal();       // show the last board this browser saw while the fresh read runs
+  renderGlobal();
   fetchGlobal();
   flushPending().then(() => { maybeCompact(); fetchGlobal(); });
   // refresh whenever the player comes back to the tab (their own score, their

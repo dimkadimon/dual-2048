@@ -388,67 +388,91 @@
        that are already sealed (a day is final once it is 2 days old).
        opts.days: how far back to read (default SHARD_DAYS).
        opts.history: also read the v2.x `arc-<timestamp>` snapshots. */
+    /* ---- cheap reads ----
+       Every full read used to be 1 list + 3 GETs, and the full board added 24-35
+       more. A shared or busy IP hits the store's rate limiter quickly, and before
+       this the whole board then fell back to a stale snapshot — which is exactly
+       "my new score is missing from the full leaderboard". So the cache is used
+       for EVERY day (not just sealed ones, so a warm cache costs 3 requests),
+       anything already fetched is reused, and one retry turns a transient 429
+       into a success instead of a miss. */
+    var READ_CACHE_MS = 10 * 60000;               // the hot keys are re-read at most every 10 min
+
+    async function readFresh(key, cache) {
+      if (cache && cache.mark) {
+        var hit = cache.get(key);
+        if (Array.isArray(hit) && cache.mark(key) && now() - cache.mark(key) < READ_CACHE_MS) return hit;
+      }
+      var rows = await readList(key, 20000);
+      if (Array.isArray(rows) && cache && cache.set) cache.set(key, rows);
+      return rows;
+    }
+
+    /* The board: live records ∪ hall of fame ∪ day archives ∪ legacy keys.
+       opts.cache: {get(key), set(key,list), mark?(key) -> last fetch time}
+       opts.days: how far back to read (default SHARD_DAYS)
+       opts.history: also read the v2.x `arc-<timestamp>` snapshots
+       opts.light: read the three hot keys only (the in-game board) */
     async function read(opts2) {
         opts2 = opts2 || {};
         var days = opts2.days || SHARD_DAYS;
         var files = opts2.extra || [];              // e.g. the repo archive snapshot
         var cache = opts2.cache || null;
-        var sealedBefore = now() - 2 * DAY;         // days older than this never change
         var oldest = now() - (days - 1) * DAY;
 
-        var listing = await archiveKeys();
-        var shardNames = [];
-        var cached = [];
+        // one listing tells us which archive keys exist (listing beats guessing:
+        // the guess covered 28 day names that usually do not exist and could not
+        // see the `arc-<timestamp>` snapshots at all)
+        var listing = opts2.light ? null : await archiveKeys();
+
         var tasks = [
           readLive(),
-          readList(TOP_KEY),
-          readList(LEGACY_KEYS[0])
+          readFresh(TOP_KEY, cache),
+          readFresh(LEGACY_KEYS[0], cache)
         ];
+        var shardNames = [];
 
         if (listing) {
-          var seenDay = Object.create(null);
           for (var n = 0; n < listing.days.length; n++) {
             var k = listing.days[n];
-            var dayIso = k.slice(4, 14);            // YYYY-MM-DD
-            var dayTs = Date.parse(dayIso + 'T00:00:00Z');
+            var dayTs = Date.parse(k.slice(4, 14) + 'T00:00:00Z');
             if (!Number.isFinite(dayTs) || dayTs < oldest - DAY) continue;
-            seenDay[dayIso] = true;
             shardNames.push(k);
           }
-          for (var h = 0; h < listing.legacy.length; h++) {
-            if (opts2.history) tasks.push(readList(listing.legacy[h], 20000));
+          if (opts2.history) {
+            for (var h = 0; h < listing.legacy.length; h++) tasks.push(readFresh(listing.legacy[h], cache));
           }
-        } else {
-          // listing failed: fall back to the day names we would have guessed
-          shardNames = shardKeys(days);
+        } else if (!opts2.light) {
+          shardNames = shardKeys(days);             // listing failed: fall back to guessed days
         }
 
-        var toFetch = [];
+        var fromCache = 0;
         for (var i = 0; i < shardNames.length; i++) {
-          var key = shardNames[i];
-          var c = (cache && Date.parse(key.slice(4, 14) + 'T00:00:00Z') < sealedBefore) ? cache.get(key) : null;
-          if (Array.isArray(c)) cached.push(c); else toFetch.push(key);
+          var c = cache && cache.get ? cache.get(shardNames[i]) : null;
+          if (Array.isArray(c)) fromCache++;
         }
-        tasks = tasks.concat(toFetch.map(function (k) { return readList(k, 20000); }));
+        tasks = tasks.concat(shardNames.map(function (k) { return readFresh(k, cache); }));
 
         var res = await Promise.all(tasks);
         var live = res[0], top = res[1], legacy = res[2];
-        var fetched = res.slice(3);
-        var shards = [];
-        for (var f = 0; f < fetched.length; f++) {
-          if (Array.isArray(fetched[f])) {
-            shards.push(fetched[f]);
-            if (cache && toFetch[f]) cache.set(toFetch[f], fetched[f]);
-          }
+        var shards = res.slice(3);
+
+        if (live === null || top === null) {
+          // a failed read must never look like an empty one: try once more
+          await sleep(600);
+          if (live === null) live = await readLive();
+          if (top === null) top = await readFresh(TOP_KEY, null);
         }
-        var sources = [live, top, legacy].concat(shards).concat(cached).concat(files);
+
+        var sources = [live, top, legacy].concat(shards).concat(files);
         var merged = collapse(merge.apply(null, sources));
         return {
           entries: merged,
           sources: {
             live: live ? live.length : null,
             top: top ? top.length : null,
-            shards: shards.length + cached.length,
+            shards: shards.filter(Array.isArray).length,
+            cached: fromCache,
             quality: (live === null && top === null) ? 'offline' : (live === null || top === null ? 'partial' : 'ok')
           }
         };
