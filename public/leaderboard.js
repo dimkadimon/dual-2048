@@ -219,6 +219,38 @@
        collapse threw away real back-to-back games that ended on the same
        score, which is exactly the "my score vanished" complaint. Two plays
        are two plays unless they share an identity. */
+    /* A corrected play. The store is append-only, so a row whose name had to be
+       fixed cannot be overwritten in place: the play is submitted again under the
+       right name and the old (timestamp, name) pair is retired here. Retired pairs
+       are dropped by merge(), which every reader and every writer goes through —
+       so a copy sitting in a browser's saved board, in a server's memory, or in an
+       older snapshot cannot resurrect the old row. */
+    var SUPERSEDED_KEY = 'superseded';
+    var SUPERSEDED = [
+      { ts: 1793932031973, name: 'ANON', replacedBy: 'Natalia' }   // 2026-11-06, score 931
+    ];
+    var retired = Object.create(null);
+    function rebuildRetired(extra) {
+      retired = Object.create(null);
+      var all = SUPERSEDED.concat(Array.isArray(extra) ? extra : []);
+      for (var i = 0; i < all.length; i++) {
+        var r = all[i];
+        if (r && Number(r.ts) > 0 && r.name != null) retired[Number(r.ts) + '|' + String(r.name).toUpperCase()] = 1;
+      }
+    }
+    rebuildRetired(null);
+
+    /* Retire a play in the store too, so the rule survives a redeploy. */
+    async function retire(ts, name, replacedBy) {
+      var cur = (await readRecord(SUPERSEDED_KEY)) || [];
+      var rec = { ts: Number(ts), name: String(name), replacedBy: replacedBy ? String(replacedBy) : null, at: now() };
+      var next = cur.filter(function (e) { return !(Number(e.ts) === rec.ts && String(e.name).toUpperCase() === rec.name.toUpperCase()); });
+      next.push(rec);
+      var res = await kvPut(SUPERSEDED_KEY, next);
+      rebuildRetired(next);
+      return { ok: res.status >= 200 && res.status < 300, status: res.status, list: next };
+    }
+
     function merge() {
       var seen = Object.create(null);
       var out = [];
@@ -234,8 +266,12 @@
           out.push({ name: String(e.name), score: Number(e.score), maxTile: Number(e.maxTile) || 0, ts: Number(e.ts) });
         }
       }
-      out.sort(function (a, b) { return b.score - a.score || a.ts - b.ts; });
-      return out;
+      var kept = [];
+      for (var q = 0; q < out.length; q++) {
+        if (!retired[out[q].ts + '|' + out[q].name.toUpperCase()]) kept.push(out[q]);
+      }
+      kept.sort(function (a, b) { return b.score - a.score || a.ts - b.ts; });
+      return kept;
     }
 
     /* The v2.x stores contain genuine double-writes: the same finished game
@@ -417,6 +453,11 @@
         opts2 = opts2 || {};
         var days = opts2.days || SHARD_DAYS;
         var files = opts2.extra || [];              // e.g. the repo archive snapshot
+        if (!opts2.light) {
+          // retirements recorded in the store (the built-in list always applies)
+          var supp = await readRecord(SUPERSEDED_KEY);
+          if (Array.isArray(supp) && supp.length) rebuildRetired(supp);
+        }
         var cache = opts2.cache || null;
         var oldest = now() - (days - 1) * DAY;
 
@@ -504,7 +545,7 @@
        into its chunks (see CHUNK_MAX) so that no archive key grows past a size
        the store can serve back intact. A chunk that already holds an entry is
        not touched — that entry is archived already. */
-    async function appendToShard(dayKeyName, entries, tries) {
+    async function appendToShard(dayKeyName, entries, tries, counter) {
       tries = tries || 3;
       for (var i = 0; i < tries; i++) {
         // the day's chunks, in order
@@ -531,6 +572,7 @@
         var todo = [];
         for (var t = 0; t < entries.length; t++) if (!have[idOf(entries[t])]) todo.push(entries[t]);
         if (!todo.length) return true;                          // everything is archived already
+        if (counter) counter.added += todo.length;              // entries the store was missing
 
         // append to the last chunk while it has room, then start a new one
         var added = chunks.map(function () { return []; });
@@ -636,14 +678,44 @@
        migration script, a server or a client. Used to fold history that
        lived only in a legacy key into the day archives. */
     async function ingest(entries) {
-      var out = { days: 0, entries: 0, top: false };
+      var out = { days: 0, entries: 0, top: false, repaired: 0 };
       var clean = [];
       for (var i = 0; i < (entries || []).length; i++) if (validEntry(entries[i])) clean.push(entries[i]);
       if (!clean.length) return out;
       var byDay = Object.create(null);
       clean.forEach(function (e) { var d = dayKey(e.ts); (byDay[d] = byDay[d] || []).push(e); });
+      var counter = { added: 0 };
       for (var day in byDay) {
-        if (await appendToShard(day, byDay[day])) { out.days++; out.entries += byDay[day].length; }
+        if (await appendToShard(day, byDay[day], 3, counter)) { out.days++; out.entries += byDay[day].length; }
+      }
+      out.repaired = counter.added;
+      // A day shard is the one key that is read-modify-written (by this function
+      // and by older clients). Anything that was written into it in between —
+      // typically by the previous build, which re-PUT the whole list from its own
+      // stale copy — can erase what we just added. So verify, and append again
+      // (appendToShard only ever adds) until the store really holds every play.
+      for (var attempt = 0; attempt < 2; attempt++) {
+        var missing = [];
+        for (var d2 in byDay) {
+          var present = Object.create(null);
+          var failed = false;
+          var keys = await kvList(d2, 10000);
+          var list = keys.ok ? (keys.keys.length ? keys.keys : [d2]) : [d2];
+          for (var ki = 0; ki < list.length; ki++) {
+            var rows = await readList(list[ki], 20000);
+            if (rows === null) { failed = true; break; }
+            for (var ri = 0; ri < rows.length; ri++) present[idOf(rows[ri])] = true;
+          }
+          if (failed) { missing.push.apply(missing, byDay[d2]); continue; }
+          for (var ei = 0; ei < byDay[d2].length; ei++) {
+            if (!present[idOf(byDay[d2][ei])]) missing.push(byDay[d2][ei]);
+          }
+        }
+        if (!missing.length) break;
+        var again = Object.create(null);
+        missing.forEach(function (e) { var d3 = dayKey(e.ts); (again[d3] = again[d3] || []).push(e); });
+        for (var d4 in again) await appendToShard(d4, again[d4]);
+        await sleep(400);
       }
       out.top = await updateTop(clean);
       return out;
@@ -759,6 +831,7 @@
       idOf: idOf,
       dayKey: dayKey,
       kvGet: kvGet, kvPut: kvPut, kvList: kvList, kvDel: kvDel,
+      retire: retire, retiredList: function (x) { rebuildRetired(x); },
       readList: readList, readRecord: readRecord,
       listKeys: function (prefix) { return kvList(prefix || ''); },
       constants: { TOP_KEY: TOP_KEY, LOCK_KEY: LOCK_KEY, LIVE_PREFIX: LIVE_PREFIX, LEGACY_KEYS: LEGACY_KEYS, TOP_CAP: TOP_CAP, SHARD_DAYS: SHARD_DAYS }

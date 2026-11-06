@@ -1,6 +1,6 @@
 {
   "name": "dual-2048",
-  "version": "3.0.2",
+  "version": "3.0.3",
   "private": true,
   "description": "Dual 2048 \u2014 two tile lineages, walls, and a global leaderboard. Zero dependencies.",
   "main": "server.js",

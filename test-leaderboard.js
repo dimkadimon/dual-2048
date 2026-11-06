@@ -456,6 +456,85 @@ const entry = (name, score, ts, tile) => ({ name, score, maxTile: tile || 64, ts
     await kv.stop();
   });
 
+  /* ------------------------------------------------------------------
+     A day shard is the only key that gets read-modify-written. Between the
+     moments a record is compacted and someone re-ingests it, another writer can
+     re-PUT the whole day from its own stale copy — and the play disappears from
+     the store entirely (it was only still visible in one server's memory).
+     ---------------------------------------------------------------- */
+  await test('ingest verifies its writes, and re-adds a play another writer erased', async () => {
+    const kv = createMockKV();
+    const url = await kv.start();
+    const lb = Leaderboard.create({ bucket: url + '/bucket' });
+    const t = Date.now() - 3600000;
+    const target = entry('Natalia', 931, t + 5000, 96);
+
+    // first ingest puts it in the day archive
+    await lb.ingest([entry('Warmup', 100, t + 1000)]);
+    await lb.ingest([target]);
+    const day = lb.dayKey(t);
+    assert(JSON.parse(kv.dump()[day]).some((e) => e.ts === target.ts), 'the play is archived');
+
+    // ... and then a stale writer re-PUTs the whole day without it (the v2.x bug)
+    kv.put(day, JSON.stringify([entry('Warmup', 100, t + 1000)]));
+    assert(!JSON.parse(kv.dump()[day]).some((e) => e.ts === target.ts), 'the clobber happened');
+
+    // a re-ingest must notice and put it back instead of trusting the PUT
+    const res = await lb.ingest([target]);
+    assert(res.repaired >= 1, 'the repair pass noticed the missing play, got ' + res.repaired);
+    assert(JSON.parse(kv.dump()[day]).some((e) => e.ts === target.ts),
+      'the play is back in the day archive after the repair');
+    const board = await lb.read({ days: 3 });
+    assert(board.entries.some((e) => e.ts === target.ts && e.name === 'Natalia'), 'and it is on the board');
+    await kv.stop();
+  });
+
+  /* ------------------------------------------------------------------
+     A name correction: the store is append-only, so the corrected play is
+     submitted again and the old row is retired. Every reader merges through
+     merge(), so a copy of the old row in a server cache, a browser's saved board
+     or an older snapshot cannot put it back.
+     ---------------------------------------------------------------- */
+  await test('a retired row stays retired, whatever a source still hands us', async () => {
+    const ts = 1793932031973;
+    const oldRow = entry('ANON', 931, ts, 96);
+    const newRow = entry('Natalia', 931, ts, 96);
+
+    // a source (stale cache / saved board / older snapshot) still has the old row
+    const kv = createMockKV();
+    const url = await kv.start();
+    const lb = Leaderboard.create({ bucket: url + '/bucket' });
+    kv.put('arc-2026-11-06', JSON.stringify([oldRow, newRow, entry('Other', 500, ts + 10)]));
+    kv.put('top', JSON.stringify([oldRow, newRow]));
+
+    const board = await lb.read({ days: 3 });
+    assert(!board.entries.some((e) => e.ts === ts && e.name === 'ANON'), 'the retired row is gone from the board');
+    assert(board.entries.some((e) => e.ts === ts && e.name === 'Natalia' && e.score === 931), 'the corrected row is there');
+    assert(board.entries.some((e) => e.name === 'Other'), 'unrelated plays are untouched');
+
+    // the same guard applies when merging a saved board with a fresh read
+    const merged = lb.merge([oldRow], [newRow]);
+    assert(merged.length === 1 && merged[0].name === 'Natalia', 'merge() drops the retired duplicate');
+    await kv.stop();
+  });
+
+  await test('a retirement recorded in the store also applies to later reads', async () => {
+    const kv = createMockKV();
+    const url = await kv.start();
+    const lb = Leaderboard.create({ bucket: url + '/bucket' });
+    const ts = Date.now() - 7200000;
+    kv.put('arc-2026-11-06', JSON.stringify([entry('Zed', 700, ts)]));
+    const res = await lb.retire(ts, 'Zed', 'Zoe');
+    assert(res.ok, 'the retirement was stored, got ' + res.status);
+    assert(JSON.parse(kv.dump().superseded).length === 1, 'one retirement in the store');
+    const board = await lb.read({ days: 3 });
+    assert(!board.entries.some((e) => e.ts === ts), 'the retired play is not on the board');
+    // and a second retirement of the same pair does not duplicate the record
+    await lb.retire(ts, 'Zed', 'Zoe');
+    assert(JSON.parse(kv.dump().superseded).length === 1, 'retiring twice keeps one record');
+    await kv.stop();
+  });
+
   /* ---------------------------------------------------------------- */
   console.log(results.join('\n'));
   console.log('\n  ' + passed + ' passed, ' + failed + ' failed');
