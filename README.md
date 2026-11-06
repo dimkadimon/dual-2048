@@ -27,6 +27,20 @@ automatic fallbacks to PNG download then text) and **CONTINUE →** which takes 
 stats, global rank, and the YOUR BEST / GLOBAL leaderboards. `R` restarts instantly from
 anywhere.
 
+## Themes
+
+Two themes, switchable from the ☀/☾ button next to the mute toggle (and on the full
+leaderboard page). The choice is remembered per browser; with no choice saved the game
+follows the operating system's light/dark preference. The theme is applied before the
+first paint, so a light-mode player never sees a dark flash.
+
+**The tile colours are the same in both themes.** Both are taken from
+[dimkadimon/2048Multi](https://github.com/dimkadimon/2048Multi): one solid gold
+(`#f2b179`) for every warm square, one solid sky blue (`#99d6ff`) for every cool hex,
+and the classic yellow (`#edc22e`) once a lineage is finished. A theme only changes the
+board and the page around the tiles — light mode uses that game's classic palette
+(`#faf8ef` page, `#bbada0` board).
+
 ## Controls
 
 - **Desktop:** Arrow keys / WASD · `P`/`Esc` pause · `R` instant restart · `M` mute · `Enter` start/rematch

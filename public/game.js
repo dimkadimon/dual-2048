@@ -161,18 +161,77 @@
   const POP = 210;         // merge pop ms
   const GHOST_LIFE = ANIM + 30;
 
+  /* Tile colours come from the reference game (dimkadimon/2048Multi): one solid
+     gold for every square-line tile, one solid sky blue for every hex-line tile,
+     and the classic yellow for a finished line. They are the same in light and
+     dark mode — a theme changes the board and the page, never the tiles. */
+  const GOLD = '#f2b179';
+  const SKY  = '#99d6ff';
+  const APEX = '#edc22e';
   const COLORS = {
-    two:   { 2:'#fbbf24', 4:'#f59e0b', 8:'#fb923c', 16:'#f97316', 32:'#ef4444', 64:'#ec4899',
-             128:'#e879f9', 256:'#d946ef', 512:'#a855f7', 1024:'#8b5cf6', 2048:'#f8fafc',
-             4096:'#fde68a', 8192:'#ffffff', 16384:'#ffffff' },
-    three: { 3:'#38bdf8', 6:'#22d3ee', 12:'#2dd4bf', 24:'#34d399', 48:'#4ade80', 96:'#a3e635',
-             192:'#a5b4fc', 384:'#818cf8', 768:'#60a5fa', 1536:'#c084fc', 3072:'#f8fafc',
-             6144:'#c4b5fd', 12288:'#ffffff', 24576:'#ffffff' }
+    two:   { 2:GOLD, 4:GOLD, 8:GOLD, 16:GOLD, 32:GOLD, 64:GOLD,
+             128:GOLD, 256:GOLD, 512:GOLD, 1024:GOLD, 2048:APEX,
+             4096:APEX, 8192:APEX, 16384:APEX },
+    three: { 3:SKY, 6:SKY, 12:SKY, 24:SKY, 48:SKY, 96:SKY,
+             192:SKY, 384:SKY, 768:SKY, 1536:SKY, 3072:APEX,
+             6144:APEX, 12288:APEX, 24576:APEX }
   };
 
   function colorFor(v, line) {
     const map = COLORS[line];
-    return map[v] || (line === 'two' ? '#ffffff' : '#e0e7ff');
+    return map[v] || (line === 'two' ? GOLD : SKY);
+  }
+
+  /* Everything around the tiles: the board, the empty cells, the walls, the
+     floating text. Light mode is the classic 2048 board (#bbada0) from the same
+     reference game, so the shared tile colours sit on the same backdrop there. */
+  const THEMES = {
+    dark: {
+      board0: '#141a3a', board1: '#0d1230', boardEdge: 'rgba(124,140,255,0.18)',
+      cell: 'rgba(10,14,36,0.55)', cellEdge: 'rgba(0,0,0,0)',
+      wall0: '#2b3360', wall1: '#1a2044', wallStripe: 'rgba(129,144,255,0.14)',
+      wallEdge: 'rgba(140,155,255,0.35)',
+      tileEdge: 'rgba(255,255,255,0.22)', tileTop: 0.22, tileBottom: 0.16,
+      tileText: '#f9f6f2', apexText: '#5c4a13',
+      floaterEdge: 'rgba(5,8,20,0.8)', floater: '#f8fafc', nudge: '#f87171',
+      share: ['#141a3a', '#070a16'], shareTitle: '', shareInk: '#e8ecff',
+      shareDim: '#929ac4', particle: '#ffffff',
+      spark: ['#f2b179', '#99d6ff']
+    },
+    light: {
+      board0: '#bbada0', board1: '#bbada0', boardEdge: 'rgba(143,122,102,0.35)',
+      cell: 'rgba(238,228,218,0.35)', cellEdge: 'rgba(0,0,0,0)',
+      wall0: '#a89484', wall1: '#8f7a66', wallStripe: 'rgba(255,255,255,0.16)',
+      wallEdge: 'rgba(120,103,89,0.55)',
+      tileEdge: 'rgba(255,255,255,0.55)', tileTop: 0.18, tileBottom: 0.1,
+      tileText: '#f9f6f2', apexText: '#5c4a13',
+      floaterEdge: 'rgba(250,248,239,0.9)', floater: '#55493f', nudge: '#e05a5a',
+      share: ['#faf8ef', '#f2e9df'], shareTitle: '', shareInk: '#55493f',
+      shareDim: '#8b8079', particle: '#ffffff',
+      spark: ['#f2b179', '#99d6ff']
+    }
+  };
+
+  let THEME = 'dark';
+  function theme() { return THEMES[THEME] || THEMES.dark; }
+
+  /* Start from whatever theme.js already put on <html> (it runs in the <head>,
+     before first paint), then follow every later switch. */
+  try {
+    const html = document.documentElement;
+    if (html && html.getAttribute('data-theme') === 'light') THEME = 'light';
+  } catch (e) { /* no document */ }
+  try {
+    window.addEventListener('dual2048:theme', (e) => {
+      setTheme(e && e.detail && e.detail.theme);
+      // repaint straight away: the canvas is not redrawn while the menu is up
+      if (typeof draw === 'function') draw(typeof performance !== 'undefined' ? performance.now() : Date.now());
+    });
+  } catch (e) { /* no window */ }
+
+  function setTheme(name) {
+    THEME = name === 'light' ? 'light' : 'dark';
+    return THEME;
   }
 
   function hexToRgb(h) {
@@ -342,7 +401,7 @@
         vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 40,
         life: 0, max: 0.42 + Math.random() * 0.4,
         size: L.cell * (0.02 + Math.random() * 0.045),
-        color: Math.random() < 0.25 ? '#ffffff' : color,
+        color: Math.random() < 0.25 ? theme().particle : color,
         glow: true
       });
     }
@@ -414,7 +473,7 @@
       timers.push({
         at: now + ANIM + 60,
         fn: () => {
-          floater(cx, cy, 'COMBO ×' + res.events.length + '  +' + bonus, '#f8fafc', L.cell * 0.34);
+          floater(cx, cy, 'COMBO ×' + res.events.length + '  +' + bonus, theme().floater, L.cell * 0.34);
           shake(4);
           Audio.combo(res.events.length);
         }
@@ -543,29 +602,30 @@
         if (!x || typeof c.toBlob !== 'function') { reject(new Error('no canvas export')); return; }
         x.scale(scale, scale);
 
+        const T = theme();
         const bg = x.createLinearGradient(0, 0, 0, H);
-        bg.addColorStop(0, '#141a3a');
-        bg.addColorStop(1, '#070a16');
+        bg.addColorStop(0, T.share[0]);
+        bg.addColorStop(1, T.share[1]);
         x.fillStyle = bg;
         x.fillRect(0, 0, W, H);
 
         x.textAlign = 'center';
         const tg = x.createLinearGradient(0, 0, W, 0);
-        tg.addColorStop(0, '#fbbf24');
-        tg.addColorStop(0.5, '#fb7185');
-        tg.addColorStop(1, '#22d3ee');
+        tg.addColorStop(0, GOLD);
+        tg.addColorStop(0.5, GOLD);
+        tg.addColorStop(1, SKY);
         x.font = '900 30px "Trebuchet MS", system-ui, sans-serif';
         x.fillStyle = tg;
         x.fillText('Dual 2048', W / 2, 42);
 
         x.font = '700 15px "Trebuchet MS", system-ui, sans-serif';
-        x.fillStyle = '#e8ecff';
+        x.fillStyle = T.shareInk;
         x.fillText(`${playerName}  ·  score ${st.score.toLocaleString()}  ·  best tile ${st.maxTile || '—'}  ·  ${st.moves} moves`, W / 2, 70);
 
         x.drawImage(canvas, padX, head, bw, bw);
 
         x.font = '600 11px "Trebuchet MS", system-ui, sans-serif';
-        x.fillStyle = '#929ac4';
+        x.fillStyle = T.shareDim;
         x.fillText(window.location.href, W / 2, H - 11);
 
         c.toBlob((b) => (b ? resolve(b) : reject(new Error('toBlob failed'))), 'image/png');
@@ -681,7 +741,7 @@
     for (let i = 0; i < 5; i++) {
       timers.push({
         at: performance.now() + i * 120,
-        fn: () => burst(L.css * (0.2 + Math.random() * 0.6), L.css * (0.2 + Math.random() * 0.5), i % 2 ? '#fbbf24' : '#22d3ee', 10)
+        fn: () => burst(L.css * (0.2 + Math.random() * 0.6), L.css * (0.2 + Math.random() * 0.5), i % 2 ? GOLD : SKY, 10)
       });
     }
     setTimeout(() => { winToast.classList.remove('show'); setTimeout(() => winToast.classList.add('hidden'), 400); }, 2600);
@@ -964,16 +1024,17 @@
       ctx.shadowBlur = s * (0.16 + 0.3 * (glowMul || 0));
     }
 
+    const T = theme();
     const g = ctx.createLinearGradient(cx, cy - s / 2, cx, cy + s / 2);
-    g.addColorStop(0, lighten(col, 0.22));
+    g.addColorStop(0, lighten(col, T.tileTop));
     g.addColorStop(0.55, col);
-    g.addColorStop(1, darken(col, 0.16));
+    g.addColorStop(1, darken(col, T.tileBottom));
     ctx.fillStyle = g;
     ctx.fill();
     ctx.shadowBlur = 0;
 
     // inner highlight
-    ctx.strokeStyle = 'rgba(255,255,255,0.22)';
+    ctx.strokeStyle = T.tileEdge;
     ctx.lineWidth = Math.max(1, s * 0.022);
     ctx.stroke();
 
@@ -982,7 +1043,7 @@
     ctx.font = `800 ${fs}px "Trebuchet MS", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillStyle = isApex ? '#1a1030' : textOn(col);
+    ctx.fillStyle = isApex ? T.apexText : textOn(col);
     ctx.fillText(String(v), cx, cy + fs * 0.05);
     ctx.restore();
   }
@@ -990,13 +1051,14 @@
   function drawWall(x, y, s, now) {
     ctx.save();
     roundRectPath(x, y, s, s, s * 0.14);
+    const T = theme();
     const g = ctx.createLinearGradient(x, y, x, y + s);
-    g.addColorStop(0, '#2b3360');
-    g.addColorStop(1, '#1a2044');
+    g.addColorStop(0, T.wall0);
+    g.addColorStop(1, T.wall1);
     ctx.fillStyle = g;
     ctx.fill();
     ctx.clip();
-    ctx.strokeStyle = 'rgba(129,144,255,0.14)';
+    ctx.strokeStyle = T.wallStripe;
     ctx.lineWidth = Math.max(2, s * 0.05);
     for (let i = -1; i < 5; i++) {
       ctx.beginPath();
@@ -1007,7 +1069,7 @@
     ctx.restore();
     ctx.save();
     roundRectPath(x, y, s, s, s * 0.14);
-    ctx.strokeStyle = 'rgba(140,155,255,0.35)';
+    ctx.strokeStyle = T.wallEdge;
     ctx.lineWidth = Math.max(1, s * 0.025);
     ctx.stroke();
     ctx.restore();
@@ -1025,12 +1087,13 @@
 
     // board bg
     roundRectPath(-4, -4, css + 8, css + 8, css * 0.055);
+    const T = theme();
     const bg = ctx.createLinearGradient(0, 0, 0, css);
-    bg.addColorStop(0, '#141a3a');
-    bg.addColorStop(1, '#0d1230');
+    bg.addColorStop(0, T.board0);
+    bg.addColorStop(1, T.board1);
     ctx.fillStyle = bg;
     ctx.fill();
-    ctx.strokeStyle = 'rgba(124,140,255,0.18)';
+    ctx.strokeStyle = T.boardEdge;
     ctx.lineWidth = 1.5;
     ctx.stroke();
 
@@ -1043,7 +1106,7 @@
           drawWall(x, y, s, now);
         } else {
           roundRectPath(x, y, s, s, s * 0.15);
-          ctx.fillStyle = 'rgba(10,14,36,0.55)';
+          ctx.fillStyle = T.cell;
           ctx.fill();
         }
       }
@@ -1103,7 +1166,7 @@
       const a = 1 - f.life / f.max;
       ctx.globalAlpha = Math.min(1, a * 1.6);
       ctx.font = `900 ${f.size}px "Trebuchet MS", system-ui, sans-serif`;
-      ctx.strokeStyle = 'rgba(5,8,20,0.8)';
+      ctx.strokeStyle = theme().floaterEdge;
       ctx.lineWidth = f.size * 0.14;
       ctx.strokeText(f.text, f.x, f.y);
       ctx.fillStyle = f.color;
@@ -1119,7 +1182,7 @@
       if (p < 1) {
         ctx.save();
         ctx.globalAlpha = (1 - p) * 0.5;
-        ctx.strokeStyle = '#f87171';
+        ctx.strokeStyle = theme().nudge;
         ctx.lineWidth = 4;
         const m = 6;
         ctx.beginPath();
@@ -1317,5 +1380,6 @@
 
   // idle demo board behind the start overlay
   Logic.newGame(st, () => 0.42);
+  try { draw(performance.now()); } catch (e) { /* canvas not sized yet: the rAF loop paints */ }
 
 })();

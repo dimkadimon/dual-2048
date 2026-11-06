@@ -1,17 +1,18 @@
 {
   "name": "dual-2048",
-  "version": "3.0.3",
+  "version": "3.0.4",
   "private": true,
   "description": "Dual 2048 \u2014 two tile lineages, walls, and a global leaderboard. Zero dependencies.",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node test.js && node test-leaderboard.js && node test-server.js",
+    "test": "node test.js && node test-leaderboard.js && node test-server.js && node test-theme.js",
     "test:game": "node test.js",
     "test:leaderboard": "node test-leaderboard.js",
     "archive": "node tools/migrate.js",
     "archive:write": "node tools/migrate.js --write",
-    "archive:verify": "node tools/migrate.js --verify"
+    "archive:verify": "node tools/migrate.js --verify",
+    "test:theme": "node test-theme.js"
   },
   "engines": {
     "node": ">=18"

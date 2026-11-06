@@ -4,12 +4,33 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="theme-color" content="#070a16" />
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem('dual2048-theme');
+        if (t !== 'light' && t !== 'dark') t = (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark';
+        document.documentElement.setAttribute('data-theme', t);
+        document.documentElement.style.colorScheme = t;
+        var m = document.querySelector('meta[name="theme-color"]');
+        if (m) m.setAttribute('content', t === 'light' ? '#faf8ef' : '#070a16');
+      } catch (e) { document.documentElement.setAttribute('data-theme', 'dark'); }
+    })();
+  </script>
   <title>Dual 2048 — Full Global Leaderboard</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%230d1230'/%3E%3Crect x='8' y='8' width='22' height='22' rx='5' fill='%23fbbf24'/%3E%3Cpath d='M45 12l11 6.5v13L45 38l-11-6.5v-13z' fill='%2322d3ee'/%3E%3Crect x='8' y='36' width='22' height='20' rx='5' fill='%231a2044'/%3E%3C/svg%3E" />
   <style>
     :root {
       --bg: #070a16; --panel: #0d1230; --line: rgba(124, 140, 255, 0.16);
-      --ink: #e8ecff; --dim: #8b93b8; --two: #fbbf24; --three: #22d3ee; --pink: #fb7185;
+      --ink: #e8ecff; --dim: #8b93b8; --two: #f2b179; --three: #99d6ff; --pink: #fb7185;
+      --btn-bg: rgba(124, 140, 255, 0.1); --row-line: rgba(124, 140, 255, 0.07);
+      --logo-1: #f2b179; --logo-2: #fb7185; --logo-3: #99d6ff;
+    }
+    /* light mode: the classic 2048 palette (dimkadimon/2048Multi) */
+    :root[data-theme="light"] {
+      --bg: #faf8ef; --panel: #ffffff; --line: rgba(187, 173, 160, 0.55);
+      --ink: #55493f; --dim: #776e65; --pink: #c2503f;
+      --btn-bg: rgba(143, 122, 102, 0.12); --row-line: rgba(187, 173, 160, 0.35);
+      --logo-1: #c9762f; --logo-2: #b74a72; --logo-3: #2f7fb8;
     }
     * { box-sizing: border-box; }
     body {
@@ -19,11 +40,12 @@
     }
     .wrap { max-width: 860px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
     h1 {
-      margin: 0; text-align: center; font-size: clamp(28px, 7vw, 40px); font-weight: 900; letter-spacing: 1px;
-      background: linear-gradient(90deg, var(--two), var(--pink) 45%, var(--three));
+      margin: 0 auto; text-align: center; font-size: clamp(28px, 7vw, 40px); font-weight: 900; letter-spacing: 1px;
+      width: max-content; max-width: 100%;
+      background: linear-gradient(90deg, var(--logo-1), var(--logo-2) 45%, var(--logo-3));
       -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; color: transparent;
     }
-    @supports not ((-webkit-background-clip: text) or (background-clip: text)) { h1 { color: var(--two); } }
+    @supports not ((-webkit-background-clip: text) or (background-clip: text)) { h1 { color: var(--logo-1); } }
     .sub { text-align: center; color: var(--dim); font-size: 12px; margin: -10px 0 0; }
     .stats { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
     .stat {
@@ -39,7 +61,7 @@
       text-align: left; font-size: 10px; letter-spacing: 1.2px; color: var(--dim);
       padding: 4px 8px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--panel);
     }
-    td { padding: 5px 8px; border-bottom: 1px solid rgba(124, 140, 255, 0.07); font-variant-numeric: tabular-nums; }
+    td { padding: 5px 8px; border-bottom: 1px solid var(--row-line); font-variant-numeric: tabular-nums; }
     tr:last-child td { border-bottom: 0; }
     .r { color: var(--dim); width: 34px; }
     .n { font-weight: 700; }
@@ -51,7 +73,7 @@
     .btns { display: flex; gap: 8px; }
     button, a.btn {
       font: inherit; font-size: 12px; font-weight: 700; letter-spacing: 0.5px; cursor: pointer;
-      color: var(--ink); background: rgba(124, 140, 255, 0.1); border: 1px solid var(--line);
+      color: var(--ink); background: var(--btn-bg); border: 1px solid var(--line);
       border-radius: 10px; padding: 7px 14px; text-decoration: none;
     }
     button:hover, a.btn:hover { background: rgba(124, 140, 255, 0.2); }
@@ -78,6 +100,7 @@
         <div class="btns">
           <span id="status"></span>
           <button id="btnRefresh">REFRESH ⟳</button>
+        <button data-theme-toggle title="Light mode" aria-label="Switch to light mode" aria-pressed="false">☀</button>
         </div>
       </div>
       <div class="scrollbox">
@@ -103,7 +126,8 @@
     </footer>
   </div>
 
-  <script src="leaderboard.js?v=3.0.3"></script>
+  <script src="theme.js?v=3.0.4"></script>
+  <script src="leaderboard.js?v=3.0.4"></script>
   <script>
     'use strict';
     var $ = function (id) { return document.getElementById(id); };
