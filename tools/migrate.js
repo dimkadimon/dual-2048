@@ -58,10 +58,22 @@ function isEntry(e) {
 
   const union = lb.merge(all);              // identity dedupe (raw store view)
   const board = lb.collapse(union);         // + collapse legacy double-writes for the board
+
+  /* Modes. public/archive.json is the HARD board's snapshot: it is what the game
+     and the board page fall back to when the store will not talk to them, so it
+     must keep holding the complete history — every play written before modes
+     existed is a hard play. The other modes are reported here, and are read
+     from their own store keys at runtime; they are not written into the shared
+     snapshot. */
+  const byMode = {};
+  for (const e of union) { const m = lb.modeOf(e); byMode[m] = (byMode[m] || 0) + 1; }
+  const hardCount = byMode[lb.DEFAULT_MODE] || 0;
+  const otherModes = Object.keys(byMode).filter((m) => m !== lb.DEFAULT_MODE);
   const dupes = all.length - union.length;
   console.log('\nsources:');
   for (const [k, n] of Object.entries(sources).sort()) console.log('   ', String(n).padStart(5), k);
-  console.log('\nrows read from the store :', all.length);
+  console.log('\nplays per mode           :', lb.MODE_ORDER.map((m) => m + ' ' + (byMode[m] || 0)).join(' · '));
+  console.log('rows read from the store :', all.length);
   console.log('distinct plays (ts|name) :', union.length, dupes ? '(collapsed ' + dupes + ' duplicate copies)' : '');
   console.log('board rows (no doubles)  :', board.length, union.length - board.length ? '(collapsed ' + (union.length - board.length) + ' double-writes)' : '');
   if (union.length) {
@@ -78,6 +90,11 @@ function isEntry(e) {
 
   let committed = [];
   try { committed = JSON.parse(fs.readFileSync(ARCHIVE_FILE, 'utf8')); } catch (e) { committed = []; }
+  // a snapshot may only ever contain hard plays; anything else would appear on
+  // the hard board for every client that falls back to it
+  const strays = committed.filter((e) => isEntry(e) && lb.modeOf(e) !== lb.DEFAULT_MODE).length;
+  if (strays) console.log('\n! the committed snapshot holds', strays, 'non-hard plays — they are excluded');
+  committed = committed.filter((e) => isEntry(e) && lb.modeOf(e) === lb.DEFAULT_MODE);
   if (committed.length) {
     const storeBoard = lb.collapse(lb.merge(committed, board));
     const seen = new Set(storeBoard.map(lb.idOf));
@@ -93,9 +110,11 @@ function isEntry(e) {
 
   if (write) {
     // 1) the permanent snapshot that travels with the repo
-    const snapshot = lb.collapse(lb.merge(committed, union));
+    const snapshot = lb.collapse(lb.merge(committed, union))
+      .filter((e) => lb.modeOf(e) === lb.DEFAULT_MODE);
     fs.writeFileSync(ARCHIVE_FILE, JSON.stringify(snapshot) + '\n');
-    console.log('\nwrote', ARCHIVE_FILE, '(' + snapshot.length + ' plays,', fs.statSync(ARCHIVE_FILE).size, 'bytes)');
+    console.log('\nwrote', ARCHIVE_FILE, '(' + snapshot.length + ' hard plays,', fs.statSync(ARCHIVE_FILE).size, 'bytes)');
+    if (otherModes.length) console.log('  other modes stay in their own keys:', otherModes.map((m) => m + ' ' + byMode[m]).join(' · '));
 
     // 2) make sure every play also sits in the day archives + hall of fame,
     //    so history that only lived in a legacy key cannot be lost

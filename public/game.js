@@ -40,21 +40,26 @@
       return { grid: new Array(N * N).fill(null), score: 0, maxTile: 0, won: false, over: false, moves: 0 };
     },
 
-    newGame(st, rng = Math.random) {
+    /* The number of walls is the game's MODE: 0 = easy, 1 = medium, 2 = hard.
+       Hard is the original game and the default, so nothing changes for the
+       existing board and tests. */
+    newGame(st, rng = Math.random, walls = 2) {
       st.grid = new Array(N * N).fill(null);
       st.score = 0; st.maxTile = 0; st.won = false; st.over = false; st.moves = 0;
-      this.placeWalls(st, rng);
+      this.placeWalls(st, rng, walls);
       this.spawn(st, rng);
       this.spawn(st, rng);
       return st;
     },
 
-    /* 2 walls, in distinct rows and distinct columns,
-       so every row/column always keeps 3 playable cells. */
-    placeWalls(st, rng = Math.random) {
-      const rows = shuffle([0, 1, 2, 3], rng).slice(0, 2);
-      const cols = shuffle([0, 1, 2, 3], rng).slice(0, 2);
-      for (let i = 0; i < 2; i++) st.grid[idx(rows[i], cols[i])] = { wall: true };
+    /* Walls sit in distinct rows and distinct columns, so every row and column
+       keeps at least one free cell. 0 walls (easy) places none. */
+    placeWalls(st, rng = Math.random, walls = 2) {
+      const n = Math.max(0, Math.min(4, Math.floor(Number(walls) || 0)));
+      if (!n) return;
+      const rows = shuffle([0, 1, 2, 3], rng).slice(0, n);
+      const cols = shuffle([0, 1, 2, 3], rng).slice(0, n);
+      for (let i = 0; i < n; i++) st.grid[idx(rows[i], cols[i])] = { wall: true };
     },
 
     emptyCells(st) {
@@ -274,10 +279,71 @@
   function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
   function lsJSON(k, dflt) { try { return JSON.parse(localStorage.getItem(k)) ?? dflt; } catch (e) { return dflt; } }
 
+  /* ---------- MODE ----------
+     0 walls = easy, 1 = medium, 2 = hard. Hard is the default and the original
+     game, and it is where every score that existed before modes lives. Each
+     mode has its own best score, its own global board and its own pending
+     queue, so switching modes can never mix two boards. */
+  const MODES = (typeof Leaderboard !== 'undefined' && Leaderboard.MODES) || {
+    easy: { id: 'easy', walls: 0, label: 'Easy' },
+    medium: { id: 'medium', walls: 1, label: 'Medium' },
+    hard: { id: 'hard', walls: 2, label: 'Hard' }
+  };
+  const MODE_ORDER = (typeof Leaderboard !== 'undefined' && Leaderboard.MODE_ORDER) || ['easy', 'medium', 'hard'];
+  const LS_MODE = 'dual2048.mode.v1';
+  function normMode(m) { return MODES[m] ? m : 'hard'; }
+
+  /* Switching mode swaps the whole board context: the best score, the cached
+     global list and the pending queue are all per mode, so nothing leaks
+     across. The demo board behind the menu is rebuilt with the new wall count. */
+  function setMode(next, opts) {
+    const m = normMode(next);
+    if (m === mode && !(opts && opts.force)) return mode;
+    mode = m;
+    lsSet(LS_MODE, mode);
+    best = parseInt(lsGet(bestKey(mode), '0'), 10) || 0;
+    globalCache = [];
+    hydrateGlobal();
+    updateHud();
+    renderLocal();
+    renderGlobal();
+    const chip = $('modeChip');
+    if (chip) {
+      chip.textContent = MODES[mode].label + ' · ' + wallsLabel(mode);
+      chip.className = 'chip mode-chip mode-' + mode;
+      chip.setAttribute('title', 'Game mode — ' + MODES[mode].label + ' (' + wallsLabel(mode) + ')');
+    }
+    document.querySelectorAll('[data-mode]').forEach((b) => {
+      const on = b.getAttribute('data-mode') === mode;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+    // a fresh demo board, so the menu shows the mode you are about to play
+    if (gstate === 'start') {
+      Logic.newGame(st, () => 0.42, MODES[mode].walls);
+      ghosts = []; particles = []; floaters = [];
+      const t0 = performance.now();
+      let i = 0;
+      forEachTile((t) => {
+        t.fx = t.tx = cellX(t.c);
+        t.fy = t.ty = cellY(t.r);
+        t.animStart = t0;
+        t.spawnT = t0 + 60 + i * 110;
+        i++;
+      });
+    }
+    fetchGlobal();
+    return mode;
+  }
+  function wallsLabel(m) {
+    const w = MODES[m].walls;
+    return w === 0 ? 'no walls' : w === 1 ? '1 wall' : w + ' walls';
+  }
+
   const LS_NAME = 'dual2048.name.v1';
   // v2 keys: old-rules (×3 hexes) scores are intentionally left behind so
   // YOUR BEST starts clean and matches the cleared global board.
-  const LS_BEST = 'dual2048.best.v2';
+  const LS_BEST = 'dual2048.best.v2';        // per mode: see bestKey()
   const LS_LOCAL = 'dual2048.local.v2';
   const LS_MUTE = 'dual2048.muted.v1';
 
@@ -352,7 +418,11 @@
   let winShown = false;
   let winLine = 'two';
   let playerName = lsGet(LS_NAME, '');
-  let best = parseInt(lsGet(LS_BEST, '0'), 10) || 0;
+  let mode = normMode(lsGet(LS_MODE, 'hard'));
+  /* Hard keeps the historic key, so an existing player's best score carries
+     over untouched; the other modes get their own. */
+  function bestKey(m) { return m === 'hard' ? LS_BEST : LS_BEST + '.' + m; }
+  let best = parseInt(lsGet(bestKey(mode), '0'), 10) || 0;
   let lastTime = performance.now();
   let lastMoveStamp = 0;
 
@@ -518,7 +588,7 @@
     elNameChip.textContent = playerName;
 
     rng = Math.random;
-    Logic.newGame(st, rng);
+    Logic.newGame(st, rng, MODES[mode].walls);
     ghosts = []; particles = []; floaters = []; timers = [];
     shakeAmp = 0; winShown = false;
 
@@ -548,7 +618,7 @@
     shake(12);
 
     const isRecord = st.score > best;
-    if (isRecord) { best = st.score; lsSet(LS_BEST, String(best)); }
+    if (isRecord) { best = st.score; lsSet(bestKey(mode), String(best)); }
 
     // local table
     const local = lsJSON(LS_LOCAL, []);
@@ -777,8 +847,11 @@
     bucket: Leaderboard.DEFAULT_BUCKET,
     storage: { get: (k) => lsGet(k), set: (k, v) => lsSet(k, v) }
   });
+  // a stuck score must be delivered to the board it belongs to, so the queue
+  // records the mode with the play and both are keyed per mode
   const LS_PENDING = 'dual2048-pending-v3';
   const HUB_API = 'https://dual-2048.onrender.com/api/scores'; // optional mirror/API
+  const apiFor = (m) => HUB_API + '?mode=' + encodeURIComponent(normMode(m));
 
   function populateList(el, entries, emptyMsg) {
     if (!el) return;
@@ -833,12 +906,18 @@
     };
   })();
 
+  const globalKey = (m) => LS_GLOBAL + '.' + normMode(m);
   function cacheGlobal() {
-    try { lsSet(LS_GLOBAL, JSON.stringify(globalCache.slice(0, 3000))); } catch (e) { /* quota */ }
+    try { lsSet(globalKey(mode), JSON.stringify(globalCache.slice(0, 3000))); } catch (e) { /* quota */ }
   }
   function hydrateGlobal() {
-    const saved = lsJSON(LS_GLOBAL, []);
+    const saved = lsJSON(globalKey(mode), []);
     if (Array.isArray(saved) && saved.length) globalCache = LB.merge(saved, globalCache);
+    // the pre-modes cache is the hard board: keep those plays, never show them elsewhere
+    if (mode === 'hard') {
+      const legacy = lsJSON(LS_GLOBAL, []);
+      if (Array.isArray(legacy) && legacy.length) globalCache = LB.merge(legacy, globalCache);
+    }
   }
 
   async function timed(promise, ms) {
@@ -856,7 +935,7 @@
     const jobs = [
       // 1) the shared store — hall of fame (+ write-once records), a few requests
       (async () => {
-        const r = await LB.read({ light: true, cache: dayStore });
+        const r = await LB.read({ light: true, cache: dayStore, mode: mode });
         globalQuality = r.sources.quality;
         return r.entries;
       })(),
@@ -864,7 +943,7 @@
       (async () => {
         const ctrl = new AbortController();
         const to = setTimeout(() => ctrl.abort(), 5000);
-        const res = await fetch('/api/scores', { signal: ctrl.signal });
+        const res = await fetch('/api/scores?mode=' + encodeURIComponent(mode), { signal: ctrl.signal });
         clearTimeout(to);
         if (!res.ok) return null;
         const data = await res.json();
@@ -876,7 +955,7 @@
       (async () => {
         const ctrl = new AbortController();
         const to = setTimeout(() => ctrl.abort(), 7000);
-        const res = await fetch(HUB_API, { signal: ctrl.signal });
+        const res = await fetch(apiFor(mode), { signal: ctrl.signal });
         clearTimeout(to);
         if (!res.ok) return null;
         const data = await res.json();
@@ -887,7 +966,7 @@
     const got = out.filter((l) => Array.isArray(l) && l.length);
     if (got.length) {
       const before = globalCache.length;
-      globalCache = LB.merge(globalCache, ...got);      // never shrinks
+      globalCache = LB.merge(globalCache, ...got).filter((e) => LB.modeOf(e) === mode);   // never shrinks
       globalTotal = globalCache.length;
       if (globalCache.length !== before) cacheGlobal();
       renderGlobal();
@@ -923,20 +1002,28 @@
   /* Scores that could not be stored yet are kept here and delivered later —
      the record id is derived from the play's timestamp, so re-sending is
      idempotent (it re-writes the same record, it can never duplicate one). */
-  function pendingAll() { return lsJSON(LS_PENDING, []); }
+  function pendingAll() {
+    return lsJSON(LS_PENDING, [])
+      .map((e) => (e && e.mode == null ? Object.assign({}, e, { mode: 'hard' }) : e))
+      .filter((e) => LB.modeOf(e) === mode);
+  }
+  function pendingAllModes() {
+    return lsJSON(LS_PENDING, []).map((e) => (e && e.mode == null ? Object.assign({}, e, { mode: 'hard' }) : e));
+  }
+  const samePlay = (a, b) => a.ts === b.ts && a.name === b.name && LB.modeOf(a) === LB.modeOf(b);
   function pendingAdd(entry) {
-    const list = pendingAll().filter((e) => !(e.ts === entry.ts && e.name === entry.name));
-    list.push(entry);
+    const list = pendingAllModes().filter((e) => !samePlay(e, entry));
+    list.push(Object.assign({}, entry, { mode: LB.modeOf(entry) }));
     lsSet(LS_PENDING, JSON.stringify(list.slice(-50)));
   }
   function pendingDrop(entry) {
-    lsSet(LS_PENDING, JSON.stringify(pendingAll().filter((e) => !(e.ts === entry.ts && e.name === entry.name))));
+    lsSet(LS_PENDING, JSON.stringify(pendingAllModes().filter((e) => !samePlay(e, entry))));
   }
   let flushing = null;
   function flushPending() {
     if (flushing) return flushing;
     flushing = (async () => {
-      const list = pendingAll();
+      const list = pendingAllModes();
       for (const e of list) {
         const out = await LB.submit(e, { id: e.ts + '-' + (e.name || '').slice(0, 4).replace(/\W/g, '') + 'r' });
         if (out.ok) pendingDrop(e); else break;   // still offline — keep them for later
@@ -962,7 +1049,7 @@
 
   async function submitGlobal(name, score, maxTile) {
     if (!score) return null;
-    const entry = { name, score, maxTile, ts: Date.now() };
+    const entry = { name, score, maxTile, ts: Date.now(), mode: mode };
     const out = await LB.submit(entry);
     if (!out.ok) pendingAdd(entry);            // never silently drop a score
     else maybeCompact();                       // keep the archives current
@@ -1309,6 +1396,14 @@
   $('btnRestartPause').addEventListener('click', startGame);
   $('btnMenuPause').addEventListener('click', toMenu);
   $('btnMute').addEventListener('click', toggleMute);
+  document.querySelectorAll('[data-mode]').forEach((b) => {
+    b.addEventListener('click', () => {
+      const m = b.getAttribute('data-mode');
+      if (normMode(m) === mode) return;
+      setMode(m);
+      Audio.ui();
+    });
+  });
   $('btnRestartTop').addEventListener('click', () => {
     if (gstate === 'playing' || gstate === 'paused' || gstate === 'over') startGame();
   });
@@ -1360,6 +1455,7 @@
   updateHud();
   setScreen('start');
   renderLocal();
+  setMode(mode, { force: true });   // paint the saved mode's chip, picker and board
   hydrateGlobal();       // show the last board this browser saw while the fresh read runs
   renderGlobal();
   fetchGlobal();
@@ -1378,8 +1474,13 @@
     if (pendingAll().length) flushPending().then(() => fetchGlobal());
   }, 120000);
 
+  // read-only view of the live board, for tests and debugging
+  try {
+    window.__gameState = () => ({ grid: st.grid, score: st.score, mode, walls: MODES[mode].walls, moves: st.moves, over: st.over });
+  } catch (e) { /* no window */ }
+
   // idle demo board behind the start overlay
-  Logic.newGame(st, () => 0.42);
+  Logic.newGame(st, () => 0.42, MODES[mode].walls);
   try { draw(performance.now()); } catch (e) { /* canvas not sized yet: the rAF loop paints */ }
 
 })();

@@ -66,7 +66,16 @@ let cooldownStep = 0;   // grows while the store keeps refusing us, resets on su
 const CACHE_FILE = process.env.BOARD_CACHE || path.join(__dirname, 'data', 'board.json');
 const SNAPSHOT_FILE = path.join(ROOT, 'archive.json');
 
-let cache = { at: 0, entries: [], quality: 'unknown' };
+/* One cached board view per mode. A mode is the number of walls: easy (none),
+   medium (1), hard (2). Hard is the default and keeps the plain ?mode= form
+   working (no query = hard), so every existing link and client still works. */
+function modeOfRequest(url) {
+  const m = String(url.searchParams.get('mode') || '').toLowerCase();
+  return Leaderboard.MODES[m] ? m : Leaderboard.DEFAULT_MODE;
+}
+
+let cache = { at: 0, entries: [], quality: 'unknown' };     // hard (the historic default)
+const caches = { hard: cache };
 let cooldownUntil = 0;
 let lastGood = 0;
 
@@ -111,35 +120,52 @@ async function freshSnapshot() {
   return remoteSnapshot || readSnapshot();
 }
 
-function loadCacheFile() {
-  try {
-    const j = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf8'));
-    if (j && Array.isArray(j.entries) && j.entries.length) {
-      cache = { at: 0, entries: j.entries, quality: 'cached' };
-      lastGood = Number(j.at) || 0;
-    }
-  } catch (e) { /* first run */ }
+function cacheFileFor(mode) {
+  mode = Leaderboard.MODES[mode] ? mode : Leaderboard.DEFAULT_MODE;
+  if (mode === Leaderboard.DEFAULT_MODE) return CACHE_FILE;      // the historic file name
+  return CACHE_FILE.replace(/\.json$/, '') + ':' + mode + '.json';
 }
 
-function saveCacheFile() {
+function loadCacheFile() {
+  for (const mode of Leaderboard.MODE_ORDER) {
+    try {
+      const j = JSON.parse(fs.readFileSync(cacheFileFor(mode), 'utf8'));
+      if (j && Array.isArray(j.entries) && j.entries.length) {
+        const view = { at: 0, entries: lb.merge(j.entries).filter((e) => lb.modeOf(e) === mode), quality: 'cached' };
+        caches[mode] = view;
+        if (mode === Leaderboard.DEFAULT_MODE) cache = view;
+        lastGood = lastGood || (Number(j.at) || 0);
+      }
+    } catch (e) { /* first run for this mode */ }
+  }
+}
+
+function saveCacheFile(mode) {
+  mode = Leaderboard.MODES[mode] ? mode : Leaderboard.DEFAULT_MODE;
+  const view = caches[mode] || cache;
   try {
     fs.mkdirSync(path.dirname(CACHE_FILE), { recursive: true });
-    fs.writeFileSync(CACHE_FILE, JSON.stringify({ at: Date.now(), entries: cache.entries.slice(0, 5000) }));
+    fs.writeFileSync(cacheFileFor(mode), JSON.stringify({ at: Date.now(), entries: view.entries.slice(0, 5000) }));
   } catch (e) { /* disk full / read-only: the in-memory cache still works */ }
 }
 
-async function board(maxAge) {
-  if (cache.entries.length && Date.now() - cache.at < (maxAge == null ? READ_TTL : maxAge)) return cache.entries;
-  if (Date.now() < cooldownUntil) return cache.entries;          // store is busy: serve what we have
+async function board(maxAge, mode) {
+  mode = Leaderboard.MODES[mode] ? mode : Leaderboard.DEFAULT_MODE;
+  if (!caches[mode] || caches[mode] === cache) caches[mode] = mode === Leaderboard.DEFAULT_MODE ? cache : { at: 0, entries: [], quality: 'unknown' };
+  const view = caches[mode];
+  const same = (list) => lb.merge(list).filter((e) => lb.modeOf(e) === mode);
+  if (view.entries.length && Date.now() - view.at < (maxAge == null ? READ_TTL : maxAge)) return view.entries;
+  if (Date.now() < cooldownUntil) return view.entries;           // store is busy: serve what we have
   try {
-    const r = await lb.read({ days: 35 });
+    const r = await lb.read({ days: 35, mode: mode });
     if (r.sources.quality !== 'offline') {
       storeHealthy();
-      const fresh = r.entries.length ? r.entries : cache.entries;
-      cache = { at: Date.now(), entries: fresh, quality: r.sources.quality };
+      const fresh = r.entries.length ? r.entries : view.entries;
+      caches[mode] = { at: Date.now(), entries: fresh, quality: r.sources.quality };
+      if (mode === Leaderboard.DEFAULT_MODE) cache = caches[mode];
       lastGood = Date.now();
-      saveCacheFile();
-      return cache.entries;
+      saveCacheFile(mode);
+      return caches[mode].entries;
     }
     // The store is refusing to talk to this host. Back off exponentially: a
     // host whose egress IP is out of quota must not keep burning requests
@@ -152,14 +178,16 @@ async function board(maxAge) {
   // we can find (the one baked into the container at deploy time and the newest
   // one on GitHub), so the mirror is never less complete than the archive file.
   // The GitHub copy can lag behind a just-pushed commit (CDN), so union both.
-  const snap = lb.merge(await freshSnapshot(), readSnapshot());
+  const snap = same(lb.merge(await freshSnapshot(), readSnapshot()));
   if (snap.length) {
-    const merged = lb.collapse(lb.merge(cache.entries, snap));
-    if (merged.length > cache.entries.length) {
-      cache = { at: Date.now(), entries: merged, quality: 'snapshot' };
+    const merged = lb.collapse(lb.merge(view.entries, snap));
+    if (merged.length > view.entries.length) {
+      const next = { at: Date.now(), entries: merged, quality: 'snapshot' };
+      caches[mode] = next;
+      if (mode === Leaderboard.DEFAULT_MODE) cache = next;
     }
   }
-  return cache.entries;
+  return caches[mode].entries;
 }
 
 /* A brand-new deployment (or one whose data/ was wiped) must not push its own
@@ -252,11 +280,16 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (p === '/api/scores' && req.method === 'GET') {
+    const mode = modeOfRequest(url);
     try {
-      const entries = await board();
-      return sendJSON(res, 200, { ok: true, scores: entries.slice(0, 50), total: entries.length, quality: cache.quality });
+      const entries = await board(null, mode);
+      return sendJSON(res, 200, {
+        ok: true, mode, modes: Leaderboard.MODE_ORDER, scores: entries.slice(0, 50),
+        total: entries.length, quality: (caches[mode] || {}).quality || 'unknown'
+      });
     } catch (e) {
-      return sendJSON(res, 200, { ok: true, scores: cache.entries.slice(0, 50), total: cache.entries.length, quality: 'stale' });
+      const view = caches[mode] || cache;
+      return sendJSON(res, 200, { ok: true, mode, scores: view.entries.slice(0, 50), total: view.entries.length, quality: 'stale' });
     }
   }
 
@@ -267,6 +300,11 @@ const server = http.createServer(async (req, res) => {
       bucket: lb.bucket,
       cached: cache.entries.length,
       quality: cache.quality,
+      modes: Leaderboard.MODE_ORDER.reduce((acc, m) => {
+        const v = caches[m] || { entries: [], quality: 'unknown', at: 0 };
+        acc[m] = { cached: v.entries.length, quality: v.quality };
+        return acc;
+      }, {}),
       lastGoodRead: lastGood ? new Date(lastGood).toISOString() : null,
       storeCooldownSec: Math.max(0, Math.round((cooldownUntil - Date.now()) / 1000))
     };
@@ -298,27 +336,37 @@ const server = http.createServer(async (req, res) => {
     try { payload = JSON.parse(await readBody(req)); }
     catch (e) { return sendJSON(res, 400, { ok: false, error: 'bad request' }); }
 
+    // the mode comes from the body, or from ?mode=; no mode at all means hard,
+    // which is what every pre-modes client sends
+    if (payload && typeof payload === 'object' && payload.mode == null) {
+      const qm = url.searchParams.get('mode');
+      if (qm) payload.mode = qm;
+    }
     const entry = lb.clean(payload);
     if (!entry) return sendJSON(res, 400, { ok: false, error: 'invalid score' });
+    const entryMode = payload && payload.mode ? (Leaderboard.MODES[payload.mode] ? payload.mode : Leaderboard.DEFAULT_MODE)
+                                              : Leaderboard.modeOf(entry);
 
     const out = await lb.submit(entry);
     if (!out.ok) return sendJSON(res, 503, { ok: false, error: 'store unavailable' });
 
-    // rank against the current view (the record itself is durable regardless)
+    // rank against the current view of THAT mode (the record is durable regardless)
     let rank = 1, total = 1, isPB = true;
     try {
-      const entries = await board();
-      const merged = lb.merge(entries, [entry]);
+      const entries = await board(null, entryMode);
+      const merged = lb.merge(entries, [entry]).filter((e) => lb.modeOf(e) === entryMode);
       rank = merged.findIndex((e) => lb.idOf(e) === lb.idOf(entry)) + 1;
       total = merged.length;
       if (!rank) rank = merged.length;
       isPB = !merged.some((e) => lb.idOf(e) !== lb.idOf(entry) &&
         String(e.name).toLowerCase() === entry.name.toLowerCase() && e.score > entry.score);
-      cache = { at: Date.now(), entries: merged, quality: 'ok' };
+      const next = { at: Date.now(), entries: merged, quality: 'ok' };
+      caches[entryMode] = next;
+      if (entryMode === Leaderboard.DEFAULT_MODE) cache = next;
     } catch (e) { /* the score is stored; the view refreshes on the next read */ }
 
     setTimeout(() => lb.compact({ serial: true }).catch(() => {}), 3000).unref?.();
-    return sendJSON(res, 200, { ok: true, rank, total, isPB });
+    return sendJSON(res, 200, { ok: true, mode: entryMode, rank, total, isPB });
   }
 
   if (p.startsWith('/api/')) return sendJSON(res, 404, { ok: false, error: 'not found' });

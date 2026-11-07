@@ -308,6 +308,36 @@ body {
 
 /* ---------- RULES ---------- */
 
+/* The start panel has to fit a phone viewport without scrolling: the mode
+   picker, the three rules and the name/PLAY row all matter before a game. */
+.panel.scroll { gap: 9px; padding: 14px; }
+@media (max-height: 940px) {
+  .panel.scroll { gap: 7px; padding: 12px; }
+  .panel .logo.big { font-size: clamp(28px, 7.5vw, 38px); }
+  .panel .tag { font-size: 12px; margin-top: -4px; }
+  .rule { padding: 8px 8px; font-size: 10px; gap: 6px; line-height: 1.35; }
+  .demo { flex: 0 0 28px; width: 28px; height: 28px; font-size: 12px; }
+  .startrow input[type="text"] { padding: 10px 12px; font-size: 14px; }
+  #btnPlay { padding: 10px 22px; font-size: 15px; }
+  .modebtn { padding: 6px 4px; }
+  @media (max-width: 430px) {
+    .rule { font-size: 9.5px; padding: 7px 6px; line-height: 1.3; }
+    .demo { flex: 0 0 24px; width: 24px; height: 24px; font-size: 11px; }
+    .rule b { display: block; margin-bottom: 1px; }
+  }
+  /* short screens: the logo is the least useful thing to keep big */
+  @media (max-height: 780px) {
+    .panel .logo.big { font-size: 28px; }
+    .panel .tag { display: none; }
+    .panel.scroll { gap: 6px; padding: 10px; }
+    .rule { font-size: 9px; padding: 6px 5px; }
+    .demo { flex-basis: 22px; width: 22px; height: 22px; }
+    .modebtn { padding: 5px 3px; }
+    .startrow input[type="text"] { padding: 8px 10px; font-size: 13px; }
+    #btnPlay { padding: 8px 18px; font-size: 14px; }
+  }
+}
+
 .rules {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -329,6 +359,8 @@ body {
   padding: 10px 8px;
 }
 .rule b { color: var(--txt); }
+.rule b { display: block; }
+.rule span:last-child { display: block; }
 
 .demo {
   flex: 0 0 34px;
@@ -342,7 +374,10 @@ body {
   color: var(--ink-on-tile);
 }
 
-@media (max-width: 430px) {
+/* The three rules stay side by side on phones: stacking them made the start
+   panel taller than the screen, which pushed the mode picker and PLAY out of
+   sight. Only a genuinely tiny screen stacks them. */
+@media (max-width: 359px) {
   .rules { grid-template-columns: 1fr; }
   .rule { flex-direction: row; text-align: left; padding: 8px 12px; }
 }
@@ -674,6 +709,56 @@ input::placeholder { color: var(--placeholder); font-weight: 600; }
 .foot .ver { font-size: 9.5px; opacity: 0.65; letter-spacing: 1.5px; }
 .foot .ghlink { font-size: 9.5px; opacity: 0.65; letter-spacing: 0.5px; color: var(--dim); text-decoration: none; }
 .foot .ghlink:hover { opacity: 1; text-decoration: underline; }
+
+/* ---------- GAME MODES ---------- */
+
+.chipcol { display: flex; flex-direction: column; gap: 3px; align-items: center; }
+
+.mode-chip {
+  font-size: 9.5px;
+  letter-spacing: 0.6px;
+  font-weight: 800;
+  padding: 1px 8px;
+  max-width: none;
+  border-color: var(--line);
+}
+.mode-chip.mode-easy { color: var(--good); }
+.mode-chip.mode-medium { color: var(--two); }
+.mode-chip.mode-hard { color: var(--bad); }
+
+.modepick {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+.modebtn {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 5px;
+  align-items: baseline;
+  justify-content: center;
+  padding: 7px 6px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: var(--tint);
+  color: var(--dim);
+  font-family: inherit;
+  cursor: pointer;
+  transition: transform 0.08s, border-color 0.15s, background 0.15s, color 0.15s;
+}
+.modebtn b { font-size: 12.5px; letter-spacing: 0.5px; color: var(--txt); }
+.modebtn span { font-size: 9.5px; letter-spacing: 0.3px; }
+.modebtn:hover { border-color: var(--accent); }
+.modebtn:active { transform: scale(0.97); }
+.modebtn.active {
+  border-color: var(--accent);
+  background: var(--accent-18);
+  color: var(--txt);
+}
+.modebtn.active b { color: var(--txt); }
+.modebtn[data-mode="easy"].active { border-color: var(--good); background: var(--accent-10); }
+.modebtn[data-mode="medium"].active { border-color: var(--two); }
+.modebtn[data-mode="hard"].active { border-color: var(--bad); }
 
 /* ---------- THEME TOGGLE ---------- */
 

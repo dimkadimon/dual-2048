@@ -18,6 +18,27 @@ browser game with a Node server for the **global leaderboard**.
 - Chain **2+ merges in one move** for a COMBO bonus (×0.5 extra per additional merge).
 - Win toasts at 2048 (squares) or 3072 (hexes) — then keep playing for score.
 
+## Modes
+
+Three modes, chosen on the start screen and remembered per browser:
+
+| Mode | Walls | Board |
+|---|---|---|
+| **Easy** | none | its own leaderboard |
+| **Medium** | 1 wall | its own leaderboard |
+| **Hard** | 2 walls (the original game) | its own leaderboard |
+
+- **Each mode has its own leaderboard**, its own best score and its own hall of
+  fame. A play is identified by `(timestamp, name, mode)`, so nothing can appear
+  on the wrong board.
+- **Every score that existed before modes is a Hard score.** A record with no
+  `mode` field *is* Hard, which is why the transfer was a no-op for the data:
+  the historic keys (`top`, `arc-YYYY-MM-DD`, `q/<id>`) remain the Hard board,
+  and the new modes use their own keys (`top:medium`, `arc-YYYY-MM-DD:easy`, …).
+  `node tools/verify-modes.js` re-checks this against the live store.
+- The mode is fixed for a game: switching happens from the start screen, so a
+  game in progress is never discarded by a mode change.
+
 ## Game flow
 
 Start screen (name entry + rules + leaderboards) → play → on game over the **final board

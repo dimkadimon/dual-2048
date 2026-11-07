@@ -47,6 +47,20 @@
     }
     @supports not ((-webkit-background-clip: text) or (background-clip: text)) { h1 { color: var(--logo-1); } }
     .sub { text-align: center; color: var(--dim); font-size: 12px; margin: -10px 0 0; }
+    .modetabs { display: flex; gap: 8px; justify-content: center; }
+    .mtab {
+      font: inherit; cursor: pointer; padding: 8px 18px; border-radius: 11px;
+      border: 1px solid var(--line); background: var(--btn-bg); color: var(--dim);
+      font-size: 11px; font-weight: 800; letter-spacing: 1.2px;
+      display: flex; flex-direction: column; align-items: center; gap: 1px;
+      transition: border-color .15s, background .15s, color .15s;
+    }
+    .mtab span { font-size: 9px; font-weight: 600; letter-spacing: .4px; opacity: .8; }
+    .mtab:hover { border-color: var(--ink); }
+    .mtab.active { color: var(--ink); background: var(--btn-bg); border-color: var(--ink); }
+    .mtab.active[data-mode="easy"] { border-color: #34d399; }
+    .mtab.active[data-mode="medium"] { border-color: var(--two); }
+    .mtab.active[data-mode="hard"] { border-color: var(--pink); }
     .stats { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
     .stat {
       background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
@@ -92,6 +106,12 @@
       <p class="sub">FULL GLOBAL LEADERBOARD — every stored score, live from the shared board</p>
     </div>
 
+    <div class="modetabs" role="tablist" aria-label="Game mode">
+      <button class="mtab" data-mode="easy" role="tab" aria-selected="false">EASY <span>no walls</span></button>
+      <button class="mtab" data-mode="medium" role="tab" aria-selected="false">MEDIUM <span>1 wall</span></button>
+      <button class="mtab" data-mode="hard" role="tab" aria-selected="true">HARD <span>2 walls</span></button>
+    </div>
+
     <div class="stats" id="stats"></div>
 
     <div class="card">
@@ -126,8 +146,8 @@
     </footer>
   </div>
 
-  <script src="theme.js?v=3.0.4"></script>
-  <script src="leaderboard.js?v=3.0.4"></script>
+  <script src="theme.js?v=3.0.5"></script>
+  <script src="leaderboard.js?v=3.0.5"></script>
   <script>
     'use strict';
     var $ = function (id) { return document.getElementById(id); };
@@ -191,8 +211,18 @@
     var shown = [];                      // what is on screen right now (never shrinks)
     var CACHE_KEY_BOARD = 'dual2048-v31-last-board';
 
+    /* Each mode is a separate board: its own keys in the store, its own API
+       endpoint, and its own "last shown" cache, so nothing leaks between them. */
+    var MODES = (LB.MODES || {});
+    var MODE_ORDER = LB.MODE_ORDER || ['easy', 'medium', 'hard'];
+    var MAXDAYS = { easy: 60, medium: 120, hard: 400 };   // history depth per mode
+    var mode = 'hard';
+    function normMode(m) { return MODES[m] ? m : 'hard'; }
+    function cacheKeyBoard(m) { return CACHE_KEY_BOARD + '.' + normMode(m); }
+    function apiFor(m) { return API_READ + '?mode=' + encodeURIComponent(normMode(m)); }
+
     function saveShown(list) {
-      try { localStorage.setItem(CACHE_KEY_BOARD, JSON.stringify(list.slice(0, 4000))); } catch (e) { /* quota */ }
+      try { localStorage.setItem(cacheKeyBoard(mode), JSON.stringify(list.slice(0, 4000))); } catch (e) { /* quota */ }
     }
     function loadShown() {
       // what this page last showed, plus what the GAME last showed in this
@@ -200,14 +230,25 @@
       // page can show it too even when the store refuses us
       var out = [];
       try {
-        var a = JSON.parse(localStorage.getItem(CACHE_KEY_BOARD) || '[]');
+        var a = JSON.parse(localStorage.getItem(cacheKeyBoard(mode)) || '[]');
         if (Array.isArray(a)) out = out.concat(a);
       } catch (e) { /* ignore */ }
       try {
-        var g = JSON.parse(localStorage.getItem('dual2048-global-v31') || '[]');
+        var g = JSON.parse(localStorage.getItem('dual2048-global-v31.' + mode) || '[]');
         if (Array.isArray(g)) out = out.concat(g);
       } catch (e) { /* ignore */ }
-      return LB.merge(out);
+      // the pre-modes caches are the hard board
+      if (mode === 'hard') {
+        try {
+          var a0 = JSON.parse(localStorage.getItem(CACHE_KEY_BOARD) || '[]');
+          if (Array.isArray(a0)) out = out.concat(a0);
+        } catch (e) { /* ignore */ }
+        try {
+          var g0 = JSON.parse(localStorage.getItem('dual2048-global-v31') || '[]');
+          if (Array.isArray(g0)) out = out.concat(g0);
+        } catch (e) { /* ignore */ }
+      }
+      return LB.merge(out).filter(function (e) { return LB.modeOf(e) === mode; });
     }
 
     function withTimeout(p, ms) {
@@ -224,7 +265,7 @@
     async function load() {
       $('status').textContent = 'loading…';
       var archiveP = grabArchive();
-      var apiP = fetch(API_READ, { cache: 'no-store' })
+      var apiP = fetch(apiFor(mode), { cache: 'no-store' })
         .then(function (r) { return r.ok ? r.json() : null; })
         .then(function (j) { return (j && j.scores && j.scores.length) ? j.scores : null; })
         .catch(function () { return null; });
@@ -232,12 +273,13 @@
         // days: 400 covers every archive key the store has kept; history: true
         // also reads the v2.x `arc-<timestamp>` snapshots, which hold plays that
         // exist in no other key.
-        LB.read({ days: 400, history: true, cache: { get: cacheGet, set: cacheSet, mark: cacheMark }, extra: [] }),
+        LB.read({ days: MAXDAYS[mode], history: true, mode: mode, cache: { get: cacheGet, set: cacheSet, mark: cacheMark }, extra: [] }),
         25000
       );
 
       // first paint: the committed snapshot (fast, and it survives any store outage)
-      var archive = await withTimeout(archiveP, 8000);
+      // the committed snapshot predates modes and holds hard-mode plays only
+      var archive = mode === 'hard' ? await withTimeout(archiveP, 8000) : null;
       if (archive && archive.length) {
         shown = LB.merge(shown, archive);
         render(shown);
@@ -250,7 +292,8 @@
       var store = r && r.entries ? r.entries : null;
       lastQuality = store ? r.sources.quality : 'offline';
 
-      var list = LB.merge(shown, store || [], api || [], archive || []);
+      var list = LB.merge(shown, store || [], api || [], archive || [])
+        .filter(function (e) { return LB.modeOf(e) === mode; });
       if (!list.length) list = LB.merge(loadShown());
       if (!list.length) {
         $('status').innerHTML = '<span class="err">board offline — try again</span>';
@@ -268,6 +311,25 @@
       var note = storeOk ? '' : ' — <b class="err">store unreachable from this network</b>, showing every source we could reach';
       $('status').innerHTML = list.length + ' scores · ' + parts.join(' + ') + ' · ' + lastQuality + ' · ' +
         new Date().toLocaleTimeString() + note;
+    }
+
+    /* Switch board. Everything on the page is rebuilt for the new mode. */
+    function setMode(next) {
+      var m = normMode(next);
+      if (m === mode) return;
+      mode = m;
+      try { localStorage.setItem('dual2048.mode.v1', m); } catch (e) { /* ignore */ }
+      shown = [];
+      document.querySelectorAll('[data-mode]').forEach(function (b) {
+        var on = b.getAttribute('data-mode') === m;
+        b.classList.toggle('active', on);
+        b.setAttribute('aria-selected', on ? 'true' : 'false');
+      });
+      $('rows').innerHTML = '';
+      $('prows').innerHTML = '';
+      $('stats').innerHTML = '';
+      try { history.replaceState(null, '', '?mode=' + m); } catch (e) { /* ignore */ }
+      load();
     }
 
     function render(list) {
@@ -306,6 +368,21 @@
           '<td class="s">' + p.total.toLocaleString() + '</td></tr>';
       }).join('');
     }
+
+    // the mode comes from ?mode= (a shared link), else the last one used here
+    (function () {
+      var q = null;
+      try { q = new URLSearchParams(location.search).get('mode'); } catch (e) { /* old browser */ }
+      var saved = null;
+      try { saved = localStorage.getItem('dual2048.mode.v1'); } catch (e) { /* ignore */ }
+      mode = normMode(q || saved || 'hard');
+      document.querySelectorAll('[data-mode]').forEach(function (b) {
+        var on = b.getAttribute('data-mode') === mode;
+        b.classList.toggle('active', on);
+        b.setAttribute('aria-selected', on ? 'true' : 'false');
+        b.addEventListener('click', function () { setMode(b.getAttribute('data-mode')); });
+      });
+    })();
 
     $('btnRefresh').addEventListener('click', load);
     document.addEventListener('visibilitychange', function () { if (!document.hidden) load(); });

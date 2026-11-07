@@ -40,6 +40,42 @@
   'use strict';
 
   var DEFAULT_BUCKET = 'https://kvdb.io/WFqmZseFLUPww2FWnuzBWs';
+  /* ============================ MODES ============================
+     A mode is how many walls a game has. It is part of a play's identity.
+
+     `hard` (2 walls) is the original game and the DEFAULT: every record written
+     before modes existed has no `mode` field at all, so "no mode" means hard —
+     which is why the whole existing leaderboard is the hard leaderboard with
+     nothing to copy, rewrite or risk. Easy and medium write `mode: 'easy'` /
+     `mode: 'medium'` on every record.
+
+     Storage mirrors that: hard keeps the original keys (`top`,
+     `arc-YYYY-MM-DD`), while a new mode gets its own keys (`top:medium`,
+     `arc-YYYY-MM-DD:medium`, …). Old readers therefore cannot see, count or
+     overwrite the new modes, and new readers are strict: an easy/medium board
+     only accepts records that explicitly say so. A hard board reads both
+     `hard` and untagged records, so a stray untagged record can never appear
+     on the wrong board, and no untagged play can be lost. */
+  var MODES = {
+    easy:   { id: 'easy',   walls: 0, label: 'Easy',   wallsLabel: 'no walls' },
+    medium: { id: 'medium', walls: 1, label: 'Medium', wallsLabel: '1 wall' },
+    hard:   { id: 'hard',   walls: 2, label: 'Hard',   wallsLabel: '2 walls' }
+  };
+  var MODE_ORDER = ['easy', 'medium', 'hard'];
+  var DEFAULT_MODE = 'hard';
+
+  function modeInfo(m) {
+    if (m === 'hard' || m == null || m === '') return MODES.hard;
+    return MODES[m] || MODES.hard;
+  }
+  /* the mode a stored record belongs to (untagged = hard, see above) */
+  function modeOf(e) {
+    if (!e || e.mode == null || e.mode === '') return DEFAULT_MODE;
+    return MODES[e.mode] ? e.mode : DEFAULT_MODE;
+  }
+  /* hard keeps the historic key names, so nothing had to be migrated */
+  function modeSuffix(m) { return m === DEFAULT_MODE ? '' : ':' + m; }
+
   var TOP_KEY = 'top';            // hall-of-fame cache (compactor only)
   var LOCK_KEY = 'lock';          // compactor lease
   var LIVE_PREFIX = 'q/';         // immutable per-game records
@@ -203,11 +239,18 @@
       var ts = Number(entry && entry.ts);
       if (!Number.isFinite(score) || score < 0 || score > 1e9) return null;
       if (!Number.isFinite(ts) || ts <= 0) ts = now();
-      return { name: name, score: score, maxTile: maxTile, ts: ts };
+      var mode = entry && entry.mode != null && MODES[entry.mode] ? entry.mode : null;
+      var out = { name: name, score: score, maxTile: maxTile, ts: ts };
+      // hard is the default, and is stored exactly as it always was
+      if (mode && mode !== DEFAULT_MODE) out.mode = mode;
+      return out;
     }
 
-    /* identity of a play: one name finishing at one instant */
-    function idOf(e) { return e.ts + '|' + e.name; }
+    /* identity of a play: one name finishing at one instant, in one mode.
+       The mode is part of it, so the same instant in two modes is two plays
+       and the day archives of the two modes can never be mistaken for each
+       other's duplicates. */
+    function idOf(e) { return e.ts + '|' + e.name + '|' + modeOf(e); }
 
     function validEntry(e) {
       return !!e && typeof e === 'object' && typeof e.name === 'string' &&
@@ -263,7 +306,9 @@
           var k = idOf(e);
           if (seen[k]) continue;
           seen[k] = 1;
-          out.push({ name: String(e.name), score: Number(e.score), maxTile: Number(e.maxTile) || 0, ts: Number(e.ts) });
+          var rec = { name: String(e.name), score: Number(e.score), maxTile: Number(e.maxTile) || 0, ts: Number(e.ts) };
+          if (modeOf(e) !== DEFAULT_MODE) rec.mode = modeOf(e);
+          out.push(rec);
         }
       }
       var kept = [];
@@ -311,7 +356,9 @@
 
     /* ---------- day archive keys ---------- */
 
-    function dayKey(ts) { return 'arc-' + new Date(ts).toISOString().slice(0, 10); }
+    function dayKey(ts, mode) {
+      return 'arc-' + new Date(ts).toISOString().slice(0, 10) + modeSuffix(modeInfo(mode).id);
+    }
 
     /* A day is one key while it is small and several keys once it is not:
 
@@ -341,6 +388,10 @@
 
     /* ---------- write path: one immutable record per game ---------- */
 
+    /* Live-record key. Hard keeps the historic `q/<id>`; a new mode appends
+       `:<mode>` so an old client's `q/` listing cannot see or clobber it. */
+    function liveKeyFor(id, mode) { return LIVE_PREFIX + id + modeSuffix(mode); }
+
     function newId(ts) {
       var rand = '';
       for (var i = 0; i < 6; i++) rand += 'abcdefghijklmnopqrstuvwxyz0123456789'[Math.floor(Math.random() * 36)];
@@ -355,7 +406,7 @@
       var e = clean(entry);
       if (!e) return { ok: false, error: 'invalid entry' };
       var id = opts2.id || newId(e.ts);
-      var key = LIVE_PREFIX + id;
+      var key = liveKeyFor(id, modeOf(e));
       var attempts = opts2.attempts || 4;
       var last = null;
       for (var i = 0; i < attempts; i++) {
@@ -369,9 +420,12 @@
 
     /* ---------- read path ---------- */
 
-    async function readLive() {
+    async function readLive(mode) {
+      var m = modeInfo(mode).id;
       var l = await kvList(LIVE_PREFIX);
       if (!l.ok) return null;
+      // easy/medium records carry the mode in their key (see submit)
+      if (m !== DEFAULT_MODE) l.keys = l.keys.filter(function (k) { return k.slice(-(m.length + 1)) === ':' + m; });
       if (!l.keys.length) return [];
       // Read in small batches, not all at once: 1000 parallel GETs from one
       // browser is exactly how a host earns a 429, and a 429 on a record read
@@ -407,16 +461,24 @@
     /* Which archive keys exist, in one request. Listing beats guessing: the
        guess was 35 hard-coded day names (28 of which usually do not exist) and
        it could not see the `arc-<timestamp>` snapshots at all. */
-    async function archiveKeys() {
+    async function archiveKeys(mode) {
+      var m = modeInfo(mode).id;
       var l = await kvList('arc-');
       if (!l.ok) return null;
       var days = [], legacy = [];
       for (var i = 0; i < l.keys.length; i++) {
         var k = l.keys[i];
+        if (!keyInMode(k, m)) continue;          // another mode's archives stay out of sight
         if (/^arc-\d{4}-\d{2}-\d{2}(\.\d+)?$/.test(k)) days.push(k);
         else if (/^arc-\d{9,}$/.test(k)) legacy.push(k);
       }
       return { days: days, legacy: legacy };
+    }
+
+    /* Is this archive key part of `mode`? Hard owns the untagged keys. */
+    function keyInMode(k, m) {
+      if (m === DEFAULT_MODE) return !/:(easy|medium)$/.test(k);
+      return k.slice(-(m.length + 1)) === ':' + m;
     }
 
     /* The board: live records ∪ hall of fame ∪ day archives ∪ legacy keys.
@@ -449,8 +511,12 @@
        opts.days: how far back to read (default SHARD_DAYS)
        opts.history: also read the v2.x `arc-<timestamp>` snapshots
        opts.light: read the three hot keys only (the in-game board) */
+    /* Board read for ONE mode. opts.mode: 'easy' | 'medium' | 'hard' (default).
+       A hard read accepts untagged and `hard` records; easy/medium accept only
+       their own tag, so a board can never show another mode's play. */
     async function read(opts2) {
         opts2 = opts2 || {};
+        var mode = modeInfo(opts2.mode).id;
         var days = opts2.days || SHARD_DAYS;
         var files = opts2.extra || [];              // e.g. the repo archive snapshot
         if (!opts2.light) {
@@ -464,13 +530,15 @@
         // one listing tells us which archive keys exist (listing beats guessing:
         // the guess covered 28 day names that usually do not exist and could not
         // see the `arc-<timestamp>` snapshots at all)
-        var listing = opts2.light ? null : await archiveKeys();
+        var listing = opts2.light ? null : await archiveKeys(mode);
 
+        var topKey = TOP_KEY + modeSuffix(mode);
         var tasks = [
-          readLive(),
-          readFresh(TOP_KEY, cache),
-          readFresh(LEGACY_KEYS[0], cache)
+          readLive(mode),
+          readFresh(topKey, cache)
         ];
+        // the v2.x `scores` key is untagged history, i.e. hard-mode plays only
+        if (mode === DEFAULT_MODE) tasks.push(readFresh(LEGACY_KEYS[0], cache));
         var shardNames = [];
 
         if (listing) {
@@ -501,13 +569,14 @@
         if (live === null || top === null) {
           // a failed read must never look like an empty one: try once more
           await sleep(600);
-          if (live === null) live = await readLive();
-          if (top === null) top = await readFresh(TOP_KEY, null);
+          if (live === null) live = await readLive(mode);
+          if (top === null) top = await readFresh(topKey, null);
         }
 
         var sources = [live, top, legacy].concat(shards).concat(files);
-        var merged = collapse(merge.apply(null, sources));
+        var merged = collapse(merge.apply(null, sources).filter(function (e) { return modeOf(e) === mode; }));
         return {
+          mode: mode,
           entries: merged,
           sources: {
             live: live ? live.length : null,
@@ -614,32 +683,36 @@
        an empty board and overwrite the real list on the next write.
        So: never write over a list that failed to parse, and rebuild it from the
        archives (which are write-once / small-key and therefore intact). */
-    async function updateTop(entries) {
+    async function updateTop(entries, mode) {
+      var m = modeInfo(mode).id;
+      var topKey = TOP_KEY + modeSuffix(m);
       for (var i = 0; i < 3; i++) {
-        var raw = await kvGet(TOP_KEY, 6000);
+        var raw = await kvGet(topKey, 6000);
         // 'bad-json' = the store returned something that is not a list: a
         // truncated value (exactly what the live `top` key is), or another
         // shape. Writing over it would destroy the hall of fame, so rebuild it
         // from the archives (which are small keys and therefore intact).
         if (!raw.ok) {
           if (raw.status !== 'bad-json') { await sleep(400); continue; }  // read failed: leave it alone
-          if (await rebuildTopFromArchives(entries)) return true;
+          if (await rebuildTopFromArchives(entries, m)) return true;
           await sleep(400);
           continue;
         }
         var cur = [];
         if (!raw.missing && raw.value != null) {
           if (!Array.isArray(raw.value)) {              // wrong shape, same treatment
-            if (await rebuildTopFromArchives(entries)) return true;
+            if (await rebuildTopFromArchives(entries, m)) return true;
             await sleep(400);
             continue;
           }
           cur = raw.value;
         }
-        var merged = merge(cur, entries).slice(0, TOP_CAP);
-        var w = await kvPut(TOP_KEY, merged, 20000);
+        var merged = merge(cur, entries)
+          .filter(function (e) { return modeOf(e) === m; })
+          .slice(0, TOP_CAP);
+        var w = await kvPut(topKey, merged, 20000);
         if (!w.ok) { await sleep(400); continue; }
-        var back = await readList(TOP_KEY);
+        var back = await readList(topKey);
         if (back) {
           var wanted = merged.slice(0, 200);        // verify the head, not all 2000
           if (wanted.every(function (e) { return back.some(function (b) { return idOf(b) === idOf(e); }); })) return true;
@@ -652,9 +725,10 @@
     /* Reconstruct the hall of fame from the day archives + anything the caller
        is holding. Only ever called when `top` itself is unusable, so there is
        nothing to clobber. */
-    async function rebuildTopFromArchives(extra) {
+    async function rebuildTopFromArchives(extra, mode) {
+      var m = modeInfo(mode).id;
       var pool = [];
-      var listing = await archiveKeys();
+      var listing = await archiveKeys(m);
       if (!listing) return false;
       var keys = listing.days.concat(listing.legacy);
       for (var k = 0; k < keys.length; k++) {
@@ -663,11 +737,12 @@
         if (rows.length) pool.push.apply(pool, rows);
       }
       pool.push.apply(pool, extra || []);
-      var merged = merge(pool).slice(0, TOP_CAP);
+      var merged = merge(pool).filter(function (e) { return modeOf(e) === m; }).slice(0, TOP_CAP);
       if (!merged.length) return false;
-      var w = await kvPut(TOP_KEY, merged, 20000);
+      var topKey = TOP_KEY + modeSuffix(m);
+      var w = await kvPut(topKey, merged, 20000);
       if (!w.ok) return false;
-      var back = await readList(TOP_KEY);
+      var back = await readList(topKey);
       return !!(back && merged.slice(0, 50).every(function (e) {
         return back.some(function (b) { return idOf(b) === idOf(e); });
       }));
@@ -683,7 +758,7 @@
       for (var i = 0; i < (entries || []).length; i++) if (validEntry(entries[i])) clean.push(entries[i]);
       if (!clean.length) return out;
       var byDay = Object.create(null);
-      clean.forEach(function (e) { var d = dayKey(e.ts); (byDay[d] = byDay[d] || []).push(e); });
+      clean.forEach(function (e) { var d = dayKey(e.ts, modeOf(e)); (byDay[d] = byDay[d] || []).push(e); });
       var counter = { added: 0 };
       for (var day in byDay) {
         if (await appendToShard(day, byDay[day], 3, counter)) { out.days++; out.entries += byDay[day].length; }
@@ -713,11 +788,16 @@
         }
         if (!missing.length) break;
         var again = Object.create(null);
-        missing.forEach(function (e) { var d3 = dayKey(e.ts); (again[d3] = again[d3] || []).push(e); });
+        missing.forEach(function (e) { var d3 = dayKey(e.ts, modeOf(e)); (again[d3] = again[d3] || []).push(e); });
         for (var d4 in again) await appendToShard(d4, again[d4]);
         await sleep(400);
       }
-      out.top = await updateTop(clean);
+      // one hall of fame per mode
+      var byMode = Object.create(null);
+      clean.forEach(function (e) { var mm = modeOf(e); (byMode[mm] = byMode[mm] || []).push(e); });
+      out.top = 0;
+      for (var mm2 in byMode) if (await updateTop(byMode[mm2], mm2)) out.top++;
+      out.top = !!out.top;
       return out;
     }
 
@@ -764,14 +844,17 @@
             }
             if (entries.length) {
               var byDay = Object.create(null);
-              entries.forEach(function (e) { var d = dayKey(e.ts); (byDay[d] = byDay[d] || []).push(e); });
+              entries.forEach(function (e) { var d = dayKey(e.ts, modeOf(e)); (byDay[d] = byDay[d] || []).push(e); });
               var allOk = true;
               for (var day in byDay) {
                 var ok = await appendToShard(day, byDay[day]);
                 if (!ok) { allOk = false; stats.failed++; log('compact: shard write failed', day); }
               }
-              var topOk = await updateTop(entries);
-              if (!topOk) { allOk = false; stats.failed++; log('compact: top write failed'); }
+              var byMode = Object.create(null);
+              entries.forEach(function (e) { var mm = modeOf(e); (byMode[mm] = byMode[mm] || []).push(e); });
+              for (var mm in byMode) {
+                if (!(await updateTop(byMode[mm], mm))) { allOk = false; stats.failed++; log('compact: top write failed', mm); }
+              }
               if (!allOk) continue;                            // leave q/ records for the next pass
               stats.ingested += entries.length;
             }
@@ -790,7 +873,8 @@
             var due = opts2.keepalive === 'force' || (now() - lastKeepAt) > (opts2.keepEveryMs || 6 * 3600000);
             if (due) {
               var arch = await kvList('arc-');
-              var keys = [TOP_KEY].concat(arch.ok && arch.keys.length ? arch.keys : shardKeys(4));
+              var tops = MODE_ORDER.map(function (m) { return TOP_KEY + modeSuffix(m); });
+              var keys = tops.concat(arch.ok && arch.keys.length ? arch.keys : shardKeys(4));
               var start = (keepState.ok && keepState.value && Number(keepState.value.i)) || 0;
               var sliceLen = Math.min(opts2.keepSlice || 40, keys.length);
               var wrote = 0;
@@ -832,11 +916,16 @@
       dayKey: dayKey,
       kvGet: kvGet, kvPut: kvPut, kvList: kvList, kvDel: kvDel,
       retire: retire, retiredList: function (x) { rebuildRetired(x); },
+      MODES: MODES, MODE_ORDER: MODE_ORDER, DEFAULT_MODE: DEFAULT_MODE,
+      modeOf: modeOf, modeInfo: modeInfo, topKeyFor: function (m) { return TOP_KEY + modeSuffix(modeInfo(m).id); },
       readList: readList, readRecord: readRecord,
       listKeys: function (prefix) { return kvList(prefix || ''); },
       constants: { TOP_KEY: TOP_KEY, LOCK_KEY: LOCK_KEY, LIVE_PREFIX: LIVE_PREFIX, LEGACY_KEYS: LEGACY_KEYS, TOP_CAP: TOP_CAP, SHARD_DAYS: SHARD_DAYS }
     };
   }
 
-  return { create: create, DEFAULT_BUCKET: DEFAULT_BUCKET, TOP_CAP: TOP_CAP, SHARD_DAYS: SHARD_DAYS, LIVE_PREFIX: LIVE_PREFIX };
+  return {
+    create: create, DEFAULT_BUCKET: DEFAULT_BUCKET, TOP_CAP: TOP_CAP, SHARD_DAYS: SHARD_DAYS, LIVE_PREFIX: LIVE_PREFIX,
+    MODES: MODES, MODE_ORDER: MODE_ORDER, DEFAULT_MODE: DEFAULT_MODE, modeOf: modeOf
+  };
 });
