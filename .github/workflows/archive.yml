@@ -1,23 +1,17 @@
-# READY-TO-ENABLE GitHub Action: keeps public/archive.json (the permanent,
-# in-repo snapshot of every score) up to date, hourly.
-#
-# Why it is not enabled yet: adding a file under .github/workflows/ needs the
-# `workflow` OAuth scope, which the token used to build this change did not
-# have. To turn it on (30 seconds, no local checkout needed):
-#
-#   GitHub → this repo → Add file → Create new file
-#   name:  .github/workflows/archive.yml
-#   paste: everything below this comment block
-#   commit.
-#
-# It needs no secrets (the store is public and the job commits with the
-# workflow's own token) and it only ever adds rows.
+# Keeps public/archive.json — the permanent, in-repo snapshot of every score —
+# minutes away from the live store. See the README ("Keeping the history
+# forever"). It needs no secrets (the store is public and the job commits with
+# the workflow's own token) and it only ever adds rows.
 
 name: Archive leaderboard
 
 on:
   schedule:
-    - cron: '17 * * * *'      # hourly
+    # Every 5 minutes. The snapshot is the floor the game and the board fall back
+    # to when the store refuses a host (kvdb rate-limits by IP), so it has to be
+    # minutes old, not an hour: an hourly snapshot meant a fresh personal best was
+    # missing from the board exactly when people were playing.
+    - cron: '*/5 * * * *'
   workflow_dispatch:
 
 permissions:
@@ -51,3 +45,26 @@ jobs:
           git add public/archive.json
           git commit -m "archive: leaderboard snapshot $(date -u +%Y-%m-%dT%H:%MZ)"
           git push
+
+      # The job commits to main, but the site is served from gh-pages, so the
+      # snapshot players download would otherwise stay frozen at whatever was
+      # there the last time somebody published. Push the single file across.
+      - name: Publish the snapshot to the site
+        run: |
+          set -euo pipefail
+          cd "$(mktemp -d)"
+          git init -q
+          git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git fetch -q --depth=1 origin gh-pages
+          git checkout -q -B gh-pages FETCH_HEAD
+          cp "$GITHUB_WORKSPACE/public/archive.json" archive.json
+          git add archive.json
+          if git diff --quiet --cached -- archive.json; then
+            echo "site snapshot already up to date"
+            exit 0
+          fi
+          git -c user.name='leaderboard-archive' -c user.email='actions@users.noreply.github.com' \
+              commit -q -m "archive: site snapshot $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push -q origin gh-pages
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

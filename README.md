@@ -155,7 +155,7 @@ collapse deleted real back-to-back games. That is the version this repo no longe
   clobbered or missing and the history is still complete.
 - **`public/archive.json`** is a permanent snapshot of every score committed to this repo
   (the store itself expires keys after ~30 days). The board reads it as a floor, and the
-  `.github/workflows/archive.yml` workflow refreshes it hourly.
+  `.github/workflows/archive.yml` workflow refreshes it every 5 minutes.
   `node tools/migrate.js` inspects/updates it, `--write` also folds history into the store.
 
 A play is only ever collapsed when it is *identical* — same player, same score, same best
@@ -184,9 +184,8 @@ public/index.html      HUD, overlays (start / pause / review / results), D-pad
 public/style.css       neon-arcade theme
 public/game.js         pure game logic (headless-testable) + canvas renderer/shell
 public/board.html      full global leaderboard (every stored score)
-public/archive.json    permanent snapshot of every score (refreshed hourly)
+public/archive.json    permanent snapshot of every score (refreshed every 5 minutes)
 tools/migrate.js       audit / export / verify the store against the archive
-tools/archive-workflow.yml  hourly archive job (copy to .github/workflows/ to enable)
 tools/mock-kv.js       kvdb look-alike used by the protocol tests
 test.js                36 game-logic tests
 test-leaderboard.js    16 protocol tests (concurrency, faults, compaction, duplicates)
@@ -201,23 +200,22 @@ node tools/migrate.js --verify  # fail if the archive and the store disagree
 
 ### Keeping the history forever
 
-> **Enable the 5-minute snapshot (one file, 30 seconds).** `public/archive.json` is the
-> floor both the game and the board fall back to when the store refuses a network, so it
-> should be minutes old, not an hour. The updated workflow lives at
-> `tools/archive-workflow.yml` (cron `*/5 * * * *`); copying it over
-> `.github/workflows/archive.yml` needs a token with the `workflow` scope. Until then the
-> hourly job still works — the board simply leans on the API/hub mirrors for the freshest
-> scores.
+`public/archive.json` is the floor both the game and the board fall back to when the store
+refuses a network, so it is refreshed every 5 minutes by
+[`.github/workflows/archive.yml`](.github/workflows/archive.yml) (cron `*/5 * * * *`, and
+runnable by hand from the Actions tab). That job does two things: it commits the merged
+snapshot to `main`, and it copies the same file onto the `gh-pages` branch — the copy the
+site actually serves — so a new personal best is never missing from the board for long.
 
 - The **store** keeps the last ~30 days alive by itself: the compactor re-writes the
   archive keys in slices (cursor kept in the store), so key expiry never eats a quiet
   month.
 - **`public/archive.json`** is the belt-and-braces copy: a plain file in this repo with
   every score ever seen, served with the game (and mirrored on raw.githubusercontent.com),
-  and used by the board as a floor. The hourly
-  [Archive leaderboard](.github/workflows/archive.yml) workflow keeps it current (and can
-  be run by hand from the Actions tab); `node tools/migrate.js --write` does the same
-  locally.
+  and used by the board as a floor. The
+  [Archive leaderboard](.github/workflows/archive.yml) workflow keeps it current every
+  5 minutes — committing it to `main` and publishing it to `gh-pages` — and can be run by
+  hand from the Actions tab; `node tools/migrate.js --write` does the same locally.
 
 ## Live deployments
 
@@ -240,5 +238,5 @@ out of the box. On Render, pushing to `main` redeploys the service.
 
 Because the client writes to the store itself, the server is optional for players — it is
 what runs the compactor, which is what keeps the archives current and re-writes them so the
-store's key expiry never eats the history. Any deployment (or the hourly GitHub Action)
+store's key expiry never eats the history. Any deployment (or the 5-minute GitHub Action)
 can do that job; whoever gets the lease does.
