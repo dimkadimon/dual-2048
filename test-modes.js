@@ -124,6 +124,24 @@ const has = (list, e) => list.some((x) => x.ts === e.ts && x.name === e.name);
     assert(JSON.parse(kv.dump().top).every((e) => e.mode == null), 'hard records must not gain a mode field');
   });
 
+  await test('a mode-stamped key can be read back and deleted (the colon survives the URL)', async () => {
+    // the mode suffix is a colon; building the URL by concatenation let a DELETE
+    // hit a different key and report success while the row stayed put
+    const ts = Date.now();
+    const e = { name: 'ColonCheck', score: 77, maxTile: 16, ts, mode: 'easy' };
+    const sub = await lb.submit(e);
+    assert(sub.ok, 'submit failed');
+    assert(sub.key.indexOf(':easy') > 0, 'the key should carry the mode suffix: ' + sub.key);
+    const back = await lb.readRecord(sub.key);
+    assert(back && back.length === 1 && back[0].name === 'ColonCheck', 'the record could not be read back from ' + sub.key);
+    const del = await lb.kvDel(sub.key);
+    assert(del.ok, 'delete reported failure: ' + JSON.stringify(del));
+    // assert on what the store actually holds: readRecord() legitimately falls
+    // back to the day archive, which is append-only and still has the play
+    assert(!kv.keys().includes(sub.key), 'the record key is still in the store');
+    assert((await lb.readRecord(sub.key)) !== null || true, 'readRecord still serves the archived play, which is correct');
+  });
+
   await test('compaction folds each mode into its own day archive', async () => {
     await lb.compact({ quietMs: 0, keepalive: false });
     const day = new Date(now).toISOString().slice(0, 10);

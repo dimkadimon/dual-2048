@@ -118,6 +118,15 @@
        nothing else for a while (a shared egress IP can burn the hourly quota),
        so a single failed read must not look like "the board is empty" — that
        mistake is what made earlier versions serve blank leaderboards. */
+    /* Keys can contain characters a URL would otherwise normalise away: the mode
+       suffix is a colon (`q/<id>:medium`, `arc-2026-11-07:easy`). Build the URL
+       with each path segment percent-encoded, so a write or a delete really
+       addresses the key it names (a DELETE that silently hit another key is how
+       a "successful" cleanup left a row behind). */
+    function urlFor(key) {
+      return BUCKET + '/' + String(key).split('/').map(encodeURIComponent).join('/');
+    }
+
     async function kvGet(key, timeoutMs, tries) {
       var attempts = tries || 3;
       var last = null;
@@ -125,7 +134,7 @@
         var t = withTimeout(timeoutMs || 8000);
         if (t.start) t.start();
         try {
-          var r = await doFetch(BUCKET + '/' + key + '', { cache: 'no-store', signal: t.signal });
+          var r = await doFetch(urlFor(key), { cache: 'no-store', signal: t.signal });
           if (t.done) t.done();
           if (r.status === 404) return { ok: true, missing: true, value: null };
           if (!r.ok) {
@@ -156,7 +165,7 @@
       var t = withTimeout(timeoutMs || 10000);
       if (t.start) t.start();
       try {
-        var r = await doFetch(BUCKET + '/' + key + '', {
+        var r = await doFetch(urlFor(key), {
           method: 'PUT',
           headers: { 'Content-Type': 'text/plain' },
           body: JSON.stringify(value),
@@ -201,7 +210,7 @@
       var t = withTimeout(timeoutMs || 8000);
       if (t.start) t.start();
       try {
-        var r = await doFetch(BUCKET + '/' + key + '', { method: 'DELETE', signal: t.signal });
+        var r = await doFetch(urlFor(key), { method: 'DELETE', signal: t.signal });
         if (t.done) t.done();
         return { ok: !!r.ok };
       } catch (e) {
