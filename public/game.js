@@ -52,11 +52,24 @@
       return st;
     },
 
+    /* Where medium's single wall may sit: the middle of each rim, never a
+       corner. A wall in a corner barely changes the board, so medium looked
+       like easy; an edge wall actually splits a row or column. */
+    MEDIUM_WALL_CELLS: [[0, 1], [0, 2], [1, 0], [1, 3], [2, 0], [2, 3], [3, 1], [3, 2]],
+
     /* Walls sit in distinct rows and distinct columns, so every row and column
        keeps at least one free cell. 0 walls (easy) places none. */
     placeWalls(st, rng = Math.random, walls = 2) {
       const n = Math.max(0, Math.min(4, Math.floor(Number(walls) || 0)));
       if (!n) return;
+      if (n === 1) {
+        // medium: one wall, edge-only (see MEDIUM_WALL_CELLS)
+        const spots = this.MEDIUM_WALL_CELLS;
+        let pick = Math.floor(rng() * spots.length);
+        if (!(pick >= 0 && pick < spots.length)) pick = 0;
+        st.grid[idx(spots[pick][0], spots[pick][1])] = { wall: true };
+        return;
+      }
       const rows = shuffle([0, 1, 2, 3], rng).slice(0, n);
       const cols = shuffle([0, 1, 2, 3], rng).slice(0, n);
       for (let i = 0; i < n; i++) st.grid[idx(rows[i], cols[i])] = { wall: true };

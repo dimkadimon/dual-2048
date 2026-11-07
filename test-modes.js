@@ -77,6 +77,39 @@ const has = (list, e) => list.some((x) => x.ts === e.ts && x.name === e.name);
     assert.deepStrictEqual(Logic.localRows(store, 'unknown'), Logic.localRows(store, 'hard'), 'an unknown mode is hard');
   });
 
+  await test('medium never puts its wall in a corner', () => {
+    const Logic = require('./public/game.js');
+    const corners = [0, 3, 12, 15];           // (0,0) (0,3) (3,0) (3,3)
+    const used = new Set();
+    for (let t = 0; t < 3000; t++) {
+      const st = Logic.newGame({}, Math.random, 1);
+      const walls = st.grid.map((c, i) => (c && c.wall ? i : -1)).filter((i) => i >= 0);
+      assert.strictEqual(walls.length, 1, 'medium must place exactly one wall');
+      assert(corners.indexOf(walls[0]) === -1, 'medium put a wall on a corner (' + walls[0] + ') — too close to easy');
+      used.add(walls[0]);
+    }
+    // edge middles only: nothing in the four middle cells' corners either
+    assert.strictEqual(used.size, 8, 'medium should use all 8 edge positions, used ' + used.size);
+    // a deterministic rng must not be able to land on a corner either
+    for (let i = 0; i < 200; i++) {
+      const st = Logic.newGame({}, () => i / 200, 1);
+      const wi = st.grid.findIndex((c) => c && c.wall);
+      assert(corners.indexOf(wi) === -1, 'edge-of-range rng produced a corner wall');
+    }
+  });
+
+  await test('easy and hard wall counts are untouched', () => {
+    const Logic = require('./public/game.js');
+    assert.strictEqual(Logic.newGame({}, Math.random, 0).grid.filter((c) => c && c.wall).length, 0, 'easy must have no walls');
+    for (let t = 0; t < 300; t++) {
+      const st = Logic.newGame({}, Math.random, 2);
+      const walls = st.grid.map((c, i) => (c && c.wall ? i : -1)).filter((i) => i >= 0);
+      assert.strictEqual(walls.length, 2, 'hard must keep two walls');
+      assert(Math.floor(walls[0] / 4) !== Math.floor(walls[1] / 4), 'hard walls share a row');
+      assert(walls[0] % 4 !== walls[1] % 4, 'hard walls share a column');
+    }
+  });
+
   /* ---------------- the data ---------------- */
   console.log('\n2. the boards do not mix');
 
