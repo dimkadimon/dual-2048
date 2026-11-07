@@ -467,7 +467,37 @@ input::placeholder { color: var(--placeholder); font-weight: 600; }
   letter-spacing: 2.5px;
   color: var(--dim);
   font-weight: 800;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
 }
+
+/* the mode a leaderboard is showing: never let it be ambiguous */
+.lb-mode {
+  font-size: 9px;
+  letter-spacing: 1.2px;
+  font-weight: 900;
+  text-transform: uppercase;
+  padding: 1px 7px;
+  border-radius: 99px;
+  border: 1px solid var(--line);
+  color: var(--txt);
+}
+.lb-mode.mode-easy { color: var(--good); border-color: var(--good); }
+.lb-mode.mode-medium { color: var(--two); border-color: var(--two); }
+.lb-mode.mode-hard { color: var(--bad); border-color: var(--bad); }
+
+.tabmode {
+  display: inline-block;
+  margin-left: 4px;
+  font-size: 8px;
+  letter-spacing: 0.6px;
+  font-weight: 800;
+  opacity: 0.75;
+  text-transform: uppercase;
+}
+.tabs button.active .tabmode { opacity: 1; }
 
 .tabs {
   display: flex;

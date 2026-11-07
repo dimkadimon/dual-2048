@@ -19,7 +19,7 @@
   </script>
   <title>Dual 2048 — two lineages, one board</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%230d1230'/%3E%3Crect x='8' y='8' width='22' height='22' rx='5' fill='%23fbbf24'/%3E%3Cpath d='M45 12l11 6.5v13L45 38l-11-6.5v-13z' fill='%2322d3ee'/%3E%3Crect x='8' y='36' width='22' height='20' rx='5' fill='%231a2044'/%3E%3C/svg%3E" />
-  <link rel="stylesheet" href="style.css?v=3.0.5" />
+  <link rel="stylesheet" href="style.css?v=3.0.6" />
 </head>
 <body>
   <div class="app">
@@ -83,10 +83,10 @@
 
 
           <div class="lbwrap">
-            <div class="lb-title">🏆 LEADERBOARDS</div>
+            <div class="lb-title">🏆 LEADERBOARDS <span class="lb-mode" id="lbModeStart">Hard</span></div>
             <div class="tabs">
-              <button data-tab="local" class="active">YOUR BEST</button>
-              <button data-tab="global">GLOBAL</button>
+              <button data-tab="local" class="active">YOUR BEST <span class="tabmode" data-mode-label>Hard</span></button>
+              <button data-tab="global">GLOBAL <span class="tabmode" data-mode-label>Hard</span></button>
             </div>
             <div class="lbhead"><span>#</span><span>PLAYER</span><span>BEST TILE</span><span>TOTAL SCORE</span></div>
             <ol class="lb" id="localList" data-tab="local"></ol>
@@ -124,9 +124,10 @@
             <button id="btnMenuOver" class="btn ghost">MENU</button>
           </div>
           <div class="lbwrap">
+            <div class="lb-title">🏆 LEADERBOARDS <span class="lb-mode" id="lbModeOver">Hard</span></div>
             <div class="tabs">
-              <button data-tab="local" class="active">YOUR BEST</button>
-              <button data-tab="global">GLOBAL</button>
+              <button data-tab="local" class="active">YOUR BEST <span class="tabmode" data-mode-label>Hard</span></button>
+              <button data-tab="global">GLOBAL <span class="tabmode" data-mode-label>Hard</span></button>
             </div>
             <div class="lbhead"><span>#</span><span>PLAYER</span><span>BEST TILE</span><span>TOTAL SCORE</span></div>
             <ol class="lb" id="overLocalList" data-tab="local"></ol>
@@ -163,14 +164,14 @@
 
     <footer class="foot">
       <div class="hints"><span>Arrows / WASD / swipe</span><span>·</span><span>P pause</span><span>·</span><span>R restart</span></div>
-      <div class="ver">Dual 2048 · build v3.0.5</div>
+      <div class="ver">Dual 2048 · build v3.0.6</div>
       <a class="ghlink" href="board.html">full global leaderboard ↗</a>
       <a class="ghlink" href="https://github.com/dimkadimon/dual-2048" target="_blank" rel="noopener">github.com/dimkadimon/dual-2048</a>
     </footer>
   </div>
 
-  <script src="theme.js?v=3.0.5"></script>
-  <script src="leaderboard.js?v=3.0.5"></script>
-  <script src="game.js?v=3.0.5"></script>
+  <script src="theme.js?v=3.0.6"></script>
+  <script src="leaderboard.js?v=3.0.6"></script>
+  <script src="game.js?v=3.0.6"></script>
 </body>
 </html>

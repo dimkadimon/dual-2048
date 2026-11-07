@@ -155,6 +155,20 @@
     }
   };
 
+  /* Headless helpers for the per-mode local table (see test-modes.js). */
+  /* Only easy and medium get their own key; anything else (hard, a missing
+     mode, a stale value in localStorage) is hard, exactly like normMode(). */
+  function perModeKey(base, m) { return (m === 'easy' || m === 'medium') ? base + '.' + m : base; }
+  Logic.localKeyFor = function (m, legacyKey) { return perModeKey(legacyKey || 'dual2048.local.v2', m); };
+  Logic.bestKeyFor = function (m, legacyKey) { return perModeKey(legacyKey || 'dual2048.best.v2', m); };
+  /* Rows of one mode's table, best first, as the leaderboard shows them. */
+  Logic.localRows = function (rawByKey, m) {
+    var rows = rawByKey && rawByKey[Logic.localKeyFor(m)];
+    if (!Array.isArray(rows)) return [];
+    return rows.slice().sort(function (a, b) { return (b.s || 0) - (a.s || 0); }).slice(0, 10)
+      .map(function (e) { return { name: e.n, score: e.s, maxTile: e.t }; });
+  };
+
   if (typeof module !== 'undefined' && module.exports) module.exports = Logic;
   if (typeof globalThis !== 'undefined') globalThis.DuoLogic = Logic;
   if (typeof document === 'undefined') return; // headless: logic only
@@ -307,6 +321,12 @@
     updateHud();
     renderLocal();
     renderGlobal();
+    // every in-game leaderboard says which mode it is showing
+    document.querySelectorAll('[data-mode-label]').forEach((el) => { el.textContent = MODES[mode].label; });
+    ['lbModeStart', 'lbModeOver'].forEach((id) => {
+      const el = $(id);
+      if (el) { el.textContent = MODES[mode].label; el.className = 'lb-mode mode-' + mode; }
+    });
     const chip = $('modeChip');
     if (chip) {
       chip.textContent = MODES[mode].label + ' · ' + wallsLabel(mode);
@@ -344,7 +364,7 @@
   // v2 keys: old-rules (×3 hexes) scores are intentionally left behind so
   // YOUR BEST starts clean and matches the cleared global board.
   const LS_BEST = 'dual2048.best.v2';        // per mode: see bestKey()
-  const LS_LOCAL = 'dual2048.local.v2';
+  const LS_LOCAL = 'dual2048.local.v2';       // per mode: see localKey()
   const LS_MUTE = 'dual2048.muted.v1';
 
   /* ================= AUDIO (tiny synth, no assets) ================= */
@@ -421,7 +441,16 @@
   let mode = normMode(lsGet(LS_MODE, 'hard'));
   /* Hard keeps the historic key, so an existing player's best score carries
      over untouched; the other modes get their own. */
-  function bestKey(m) { return m === 'hard' ? LS_BEST : LS_BEST + '.' + m; }
+  const perMode = (base, m) => (m === 'easy' || m === 'medium') ? base + '.' + m : base;
+  function bestKey(m) { return perMode(LS_BEST, m); }
+  /* The local "your best" table is per mode too. Hard keeps the historic key, so
+     every score this browser already recorded stays where it is; the other modes
+     get their own table. */
+  function localKey(m) { return perMode(LS_LOCAL, m); }
+  function localList(m) {
+    const rows = lsJSON(localKey(m), []);
+    return (Array.isArray(rows) ? rows : []).slice().sort((a, b) => (b.s || 0) - (a.s || 0)).slice(0, 10);
+  }
   let best = parseInt(lsGet(bestKey(mode), '0'), 10) || 0;
   let lastTime = performance.now();
   let lastMoveStamp = 0;
@@ -620,11 +649,12 @@
     const isRecord = st.score > best;
     if (isRecord) { best = st.score; lsSet(bestKey(mode), String(best)); }
 
-    // local table
-    const local = lsJSON(LS_LOCAL, []);
+    // local table for THIS mode (a game is always filed under the mode it was
+    // played in, never under whichever mode is selected later)
+    const local = lsJSON(localKey(mode), []);
     local.push({ n: playerName, s: st.score, t: st.maxTile, d: Date.now() });
-    local.sort((a, b) => b.s - a.s);
-    lsSet(LS_LOCAL, JSON.stringify(local.slice(0, 10)));
+    local.sort((a, b) => b.s - a.s);              // keep the full table, show the top 10
+    lsSet(localKey(mode), JSON.stringify(local.slice(0, 50)));
 
     // phase 1: keep the final board visible with a review bar
     $('reviewScore').textContent = st.score.toLocaleString();
@@ -870,9 +900,10 @@
   }
 
   function renderLocal() {
-    const list = lsJSON(LS_LOCAL, []).map((e) => ({ name: e.n, score: e.s, maxTile: e.t }));
-    populateList($('localList'), list, 'No scores yet — be the first!');
-    populateList($('overLocalList'), list, 'No scores yet — be the first!');
+    const list = localList(mode).map((e) => ({ name: e.n, score: e.s, maxTile: e.t, mode }));
+    const empty = 'No ' + MODES[mode].label.toLowerCase() + ' scores yet — be the first!';
+    populateList($('localList'), list, empty);
+    populateList($('overLocalList'), list, empty);
   }
 
   let globalCache = [];

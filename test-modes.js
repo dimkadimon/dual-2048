@@ -53,6 +53,30 @@ const has = (list, e) => list.some((x) => x.ts === e.ts && x.name === e.name);
     assert.strictEqual(walls(2), 2, 'hard has two walls');
   });
 
+  await test('"your best" is one table per mode, with hard on the historic key', () => {
+    const Logic = require('./public/game.js');
+    assert.strictEqual(Logic.localKeyFor('hard'), 'dual2048.local.v2', 'hard must keep the existing table');
+    assert.strictEqual(Logic.localKeyFor('medium'), 'dual2048.local.v2.medium');
+    assert.strictEqual(Logic.localKeyFor('easy'), 'dual2048.local.v2.easy');
+    assert.strictEqual(Logic.localKeyFor(null), 'dual2048.local.v2', 'no mode means hard');
+    assert.strictEqual(Logic.bestKeyFor('hard'), 'dual2048.best.v2');
+    assert.strictEqual(Logic.bestKeyFor('easy'), 'dual2048.best.v2.easy');
+  });
+
+  await test('a mode\'s rows never include another mode\'s plays', () => {
+    const Logic = require('./public/game.js');
+    const store = {
+      'dual2048.local.v2': [{ n: 'HardOne', s: 900, t: 96 }, { n: 'HardTwo', s: 100, t: 8 }],
+      'dual2048.local.v2.easy': [{ n: 'EasyOne', s: 5000, t: 2048 }],
+      'dual2048.local.v2.medium': [{ n: 'MedOne', s: 1500, t: 192 }, { n: 'MedTwo', s: 1600, t: 192 }]
+    };
+    assert.deepStrictEqual(Logic.localRows(store, 'hard').map((e) => e.name), ['HardOne', 'HardTwo']);
+    assert.deepStrictEqual(Logic.localRows(store, 'easy').map((e) => e.name), ['EasyOne']);
+    // sorted best-first, not insertion order
+    assert.deepStrictEqual(Logic.localRows(store, 'medium').map((e) => e.name), ['MedTwo', 'MedOne']);
+    assert.deepStrictEqual(Logic.localRows(store, 'unknown'), Logic.localRows(store, 'hard'), 'an unknown mode is hard');
+  });
+
   /* ---------------- the data ---------------- */
   console.log('\n2. the boards do not mix');
 
@@ -155,6 +179,20 @@ const has = (list, e) => list.some((x) => x.ts === e.ts && x.name === e.name);
     const H = (await lb.read({ days: 400, history: true, mode: 'hard' })).entries;
     assert.strictEqual(E.length, 2, 'easy board changed after compaction: ' + E.length);
     assert.strictEqual(H.length, before.entries.length + 2, 'hard board changed after compaction: ' + H.length);
+  });
+
+  await test('both in-game leaderboards are labelled with the mode', () => {
+    const html = require('fs').readFileSync(require('path').join(__dirname, 'public', 'index.html'), 'utf8');
+    // a mode badge on each leaderboard title, and the mode on both tabs, in the
+    // start screen and on the results screen
+    const titles = (html.match(/class="lb-mode"/g) || []).length;
+    const tabLabels = (html.match(/data-mode-label/g) || []).length;
+    assert.strictEqual(titles, 2, 'expected a mode badge on both leaderboards, found ' + titles);
+    assert.strictEqual(tabLabels, 4, 'expected the mode on all four tabs, found ' + tabLabels);
+    // and the game keeps them in sync when the mode changes
+    const js = require('fs').readFileSync(require('path').join(__dirname, 'public', 'game.js'), 'utf8');
+    assert(/data-mode-label/.test(js), 'the game never updates the tab labels');
+    assert(/lbModeStart/.test(js) && /lbModeOver/.test(js), 'the game never updates the leaderboard badges');
   });
 
   /* ---------------- the request layer ---------------- */
