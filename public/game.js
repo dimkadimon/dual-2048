@@ -52,10 +52,16 @@
       return st;
     },
 
-    /* Where medium's single wall may sit: the middle of each rim, never a
-       corner. A wall in a corner barely changes the board, so medium looked
-       like easy; an edge wall actually splits a row or column. */
-    MEDIUM_WALL_CELLS: [[0, 1], [0, 2], [1, 0], [1, 3], [2, 0], [2, 3], [3, 1], [3, 2]],
+    /* Where medium's single wall may sit: any cell except the four corners. A
+       corner wall barely changes the board, so medium looked like easy; every
+       other cell — edges and the central 2x2 included — actually splits a row
+       or column. */
+    MEDIUM_WALL_CELLS: [
+      [0, 1], [0, 2],
+      [1, 0], [1, 1], [1, 2], [1, 3],
+      [2, 0], [2, 1], [2, 2], [2, 3],
+      [3, 1], [3, 2]
+    ],
 
     /* Walls sit in distinct rows and distinct columns, so every row and column
        keeps at least one free cell. 0 walls (easy) places none. */

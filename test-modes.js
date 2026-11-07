@@ -77,25 +77,40 @@ const has = (list, e) => list.some((x) => x.ts === e.ts && x.name === e.name);
     assert.deepStrictEqual(Logic.localRows(store, 'unknown'), Logic.localRows(store, 'hard'), 'an unknown mode is hard');
   });
 
-  await test('medium never puts its wall in a corner', () => {
+  await test('medium never puts its wall in a corner, and may use the centre', () => {
     const Logic = require('./public/game.js');
     const corners = [0, 3, 12, 15];           // (0,0) (0,3) (3,0) (3,3)
+    const centre = [5, 6, 9, 10];             // (1,1) (1,2) (2,1) (2,2)
     const used = new Set();
-    for (let t = 0; t < 3000; t++) {
+    const counts = {};
+    const rounds = 3000;
+    for (let t = 0; t < rounds; t++) {
       const st = Logic.newGame({}, Math.random, 1);
       const walls = st.grid.map((c, i) => (c && c.wall ? i : -1)).filter((i) => i >= 0);
       assert.strictEqual(walls.length, 1, 'medium must place exactly one wall');
       assert(corners.indexOf(walls[0]) === -1, 'medium put a wall on a corner (' + walls[0] + ') — too close to easy');
       used.add(walls[0]);
+      counts[walls[0]] = (counts[walls[0]] || 0) + 1;
     }
-    // edge middles only: nothing in the four middle cells' corners either
-    assert.strictEqual(used.size, 8, 'medium should use all 8 edge positions, used ' + used.size);
-    // a deterministic rng must not be able to land on a corner either
-    for (let i = 0; i < 200; i++) {
-      const st = Logic.newGame({}, () => i / 200, 1);
+    // every non-corner cell is in play — the central 2x2 included
+    assert.strictEqual(used.size, 12, 'medium should use all 12 non-corner cells, used ' + used.size);
+    const centreHits = centre.reduce((a, i) => a + (counts[i] || 0), 0);
+    centre.forEach((i) => {
+      assert((counts[i] || 0) > 0, 'the central cell ' + i + ' never received the wall');
+    });
+    // the centre is 4 of 12 cells, so it should take roughly a third of games
+    assert(centreHits / rounds > 0.2 && centreHits / rounds < 0.47,
+      'central 2x2 share looks wrong: ' + (centreHits / rounds).toFixed(3));
+    // a deterministic rng must not be able to land on a corner either, and must
+    // reach the centre for some values
+    let deterministicCentre = 0;
+    for (let i = 0; i < 240; i++) {
+      const st = Logic.newGame({}, () => i / 240, 1);
       const wi = st.grid.findIndex((c) => c && c.wall);
       assert(corners.indexOf(wi) === -1, 'edge-of-range rng produced a corner wall');
+      if (centre.indexOf(wi) !== -1) deterministicCentre++;
     }
+    assert(deterministicCentre > 0, 'no rng value ever produced a central wall');
   });
 
   await test('easy and hard wall counts are untouched', () => {
