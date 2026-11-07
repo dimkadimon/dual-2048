@@ -243,6 +243,27 @@ const has = (list, e) => list.some((x) => x.ts === e.ts && x.name === e.name);
     assert(/lbModeStart/.test(js) && /lbModeOver/.test(js), 'the game never updates the leaderboard badges');
   });
 
+  await test('every asset tag carries the current build number', () => {
+    // The bug this guards: the ?v= tags kept saying 3.0.6 while the build grew,
+    // so browsers happily reused their cached game.js and a shipped fix was
+    // invisible to the player. Bump the version, bump the tags.
+    const fs = require('fs');
+    const path = require('path');
+    const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8'));
+    const ver = pkg.version;
+    ['public/index.html', 'public/board.html'].forEach((rel) => {
+      const html = fs.readFileSync(path.join(__dirname, rel), 'utf8');
+      const tags = html.match(/\?v=([0-9][0-9.]*)/g) || [];
+      assert(tags.length > 0, rel + ' has no versioned asset tags');
+      tags.forEach((t) => {
+        assert.strictEqual(t, '?v=' + ver, rel + ' asks for ' + t + ' but the build is v' + ver);
+      });
+      if (rel === 'public/index.html') {
+        assert(html.indexOf('build v' + ver) !== -1, 'the build number on screen is not v' + ver);
+      }
+    });
+  });
+
   /* ---------------- the request layer ---------------- */
   console.log('\n3. the API');
 
